@@ -32,12 +32,16 @@ namespace HdrSwitch
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
-            bool first;
-            using (new Mutex(true, @"Local\HdrSwitch.SingleInstance", out first))
+            // --updated: started by the old version during an update – wait for it to exit instead of giving up.
+            bool updated = args.Contains("--updated");
+            using (var mutex = new Mutex(false, @"Local\HdrSwitch.SingleInstance"))
             {
-                if (!first)
+                bool mine;
+                try { mine = mutex.WaitOne(updated ? 15000 : 0); }
+                catch (AbandonedMutexException) { mine = true; }
+                if (!mine)
                 {
                     MessageBox.Show("HDR Switch is already running – look for its icon in the tray.", "HDR Switch");
                     return;
@@ -45,7 +49,8 @@ namespace HdrSwitch
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
-                Application.Run(new TrayApp());
+                Application.Run(new TrayApp(updated));
+                mutex.ReleaseMutex();
             }
         }
     }
@@ -79,13 +84,16 @@ namespace HdrSwitch
         bool scanning;
         readonly Dictionary<int, Running> running = new Dictionary<int, Running>();
         readonly List<Hdr.Display> owned = new List<Hdr.Display>();   // displays this app switched to HDR
-        ToolStripMenuItem status, gamesMenu, startup;
+        ToolStripMenuItem status, gamesMenu, startup, updateItem;
         static readonly object GameToggle = new object();   // Tag of the game tick items
         bool keepOpen;
+        Updater.Release update;   // a newer release, once found
+        bool updating;
 
-        public TrayApp()
+        public TrayApp(bool updated)
         {
             Directory.CreateDirectory(Dir);
+            Updater.CleanUp();
             bool firstRun = !File.Exists(ListFile);
             LoadList();
             BuildMenu();
@@ -123,6 +131,60 @@ namespace HdrSwitch
             var trim = new System.Windows.Forms.Timer { Interval = 5000 };
             trim.Tick += (s, e) => { trim.Dispose(); Trim(); };
             trim.Start();
+
+            if (updated) Notify("Updated to version " + Updater.CurrentText + ".");
+
+            // Updates: first look 1 minute after startup, then once a day.
+            if (Updater.Enabled)
+            {
+                var updates = new System.Windows.Forms.Timer { Interval = 60000 };
+                updates.Tick += (s, e) => { updates.Interval = 24 * 60 * 60 * 1000; CheckForUpdate(); };
+                updates.Start();
+            }
+        }
+
+        // ---- updates ----
+
+        void CheckForUpdate()
+        {
+            if (update != null || updating) return;
+            new Thread(() =>
+            {
+                Updater.Release r = null;
+                try { r = Updater.Latest(); } catch { }   // offline, rate-limited… try again tomorrow
+                if (r != null) ui.Post(_ => OnUpdateFound(r), null);
+            }) { IsBackground = true }.Start();
+        }
+
+        void OnUpdateFound(Updater.Release r)
+        {
+            update = r;
+            updateItem.Text = "Update to version " + r.VersionText;
+            updateItem.Visible = true;
+            Notify("Version " + r.VersionText + " is available – right-click the tray icon › Update.");
+        }
+
+        void InstallUpdate()
+        {
+            if (update == null || updating) return;
+            updating = true;
+            updateItem.Text = "Updating…";
+            updateItem.Enabled = false;
+            var r = update;
+            new Thread(() =>
+            {
+                string error = null;
+                try { Updater.Install(r); }
+                catch (Exception e) { error = e.Message; }
+                ui.Post(_ =>
+                {
+                    if (error == null) { ExitThread(); return; }   // the new version is starting
+                    updating = false;
+                    updateItem.Text = "Update to version " + r.VersionText;
+                    updateItem.Enabled = true;
+                    Notify("Update failed: " + error);
+                }, null);
+            }) { IsBackground = true }.Start();
         }
 
         // ---- game tracking ----
@@ -350,6 +412,7 @@ namespace HdrSwitch
         void BuildMenu()
         {
             status = new ToolStripMenuItem { Enabled = false };
+            updateItem = new ToolStripMenuItem("Update", null, (s, e) => InstallUpdate()) { Visible = false, Font = new Font(menu.Font, FontStyle.Bold) };
             gamesMenu = new ToolStripMenuItem("Games");
             gamesMenu.DropDownItems.Add("…");   // placeholder so the submenu arrow shows
             gamesMenu.DropDownOpening += (s, e) => FillGames();
@@ -357,7 +420,7 @@ namespace HdrSwitch
 
             menu.Items.AddRange(new ToolStripItem[]
             {
-                status, new ToolStripSeparator(),
+                status, updateItem, new ToolStripSeparator(),
                 gamesMenu, startup, new ToolStripSeparator(),
                 new ToolStripMenuItem("Exit", null, (s, e) => ExitThread())
             });
@@ -455,7 +518,7 @@ namespace HdrSwitch
         void UpdateTray()
         {
             tray.Icon = Hdr.All().Any(d => d.On) ? iconOn : iconOff;
-            string text = "HDR Switch\n" + StatusText();
+            string text = "HDR Switch " + Updater.CurrentText + "\n" + StatusText();
             tray.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;   // NotifyIcon limit
         }
 
@@ -524,6 +587,122 @@ namespace HdrSwitch
             tray.Visible = false;
             tray.Dispose();
             base.ExitThreadCore();
+        }
+    }
+
+    /// <summary>
+    /// Updates from this project's GitHub releases. Only api.github.com and the release downloads of this repository
+    /// are ever contacted, and a download is only installed if its SHA256 matches the release's SHA256SUMS.txt.
+    /// Install: the running exe is renamed to HdrSwitch.old.exe (Windows allows that), the new one takes its name
+    /// and is started with --updated; it waits for this copy to exit and removes the old file.
+    /// </summary>
+    static class Updater
+    {
+        public const string Repo = "GITHUB_OWNER/hdr-auto-switch";
+        const string ExeName = "HdrSwitch.exe";
+        static readonly string DownloadPrefix = "https://github.com/" + Repo + "/releases/download/";
+
+        public sealed class Release
+        {
+            public Version Version;
+            public string ExeUrl, SumsUrl;
+            public string VersionText { get { return Text(Version); } }
+        }
+
+        public static readonly Version Current = ThreeParts(typeof(Updater).Assembly.GetName().Version);
+        public static string CurrentText { get { return Text(Current); } }
+
+        /// <summary>Dev builds (0.0.0, built without a version) never update themselves.</summary>
+        public static bool Enabled { get { return Current > new Version(0, 0, 0); } }
+
+        /// <summary>The latest release if it is newer than this copy, otherwise null.</summary>
+        public static Release Latest()
+        {
+            string json;
+            using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest");
+            var data = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
+
+            Version v;
+            string tag = data.ContainsKey("tag_name") ? data["tag_name"] as string : null;
+            if (tag == null || !Version.TryParse(tag.TrimStart('v', 'V'), out v)) return null;
+            var r = new Release { Version = ThreeParts(v) };
+            if (r.Version <= Current) return null;
+
+            foreach (object o in (System.Collections.IEnumerable)data["assets"])
+            {
+                var a = o as Dictionary<string, object>;
+                if (a == null) continue;
+                string name = a["name"] as string, url = a["browser_download_url"] as string;
+                if (url == null || !url.StartsWith(DownloadPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (name == ExeName) r.ExeUrl = url;
+                else if (name == "SHA256SUMS.txt") r.SumsUrl = url;
+            }
+            return r.ExeUrl != null && r.SumsUrl != null ? r : null;
+        }
+
+        /// <summary>Downloads, checks and swaps in the new exe, then starts it. Throws with a short reason on failure.</summary>
+        public static void Install(Release r)
+        {
+            string exe = Application.ExecutablePath;
+            string dir = Path.GetDirectoryName(exe);
+            string fresh = Path.Combine(dir, "HdrSwitch.new.exe"), old = Path.Combine(dir, "HdrSwitch.old.exe");
+
+            byte[] bytes;
+            string sums;
+            using (var web = Client())
+            {
+                sums = web.DownloadString(r.SumsUrl);
+                bytes = web.DownloadData(r.ExeUrl);
+            }
+
+            var line = sums.Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.EndsWith(" " + ExeName) || l.EndsWith("*" + ExeName));
+            if (line == null) throw new Exception("the release has no checksum for " + ExeName + ".");
+            string expected = line.Split(' ')[0].ToLowerInvariant();
+            string actual;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+                actual = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+            if (actual != expected) throw new Exception("the download doesn't match its checksum – nothing was changed.");
+
+            try
+            {
+                File.WriteAllBytes(fresh, bytes);
+                if (File.Exists(old)) File.Delete(old);
+                File.Move(exe, old);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new Exception("no permission to write to " + dir + ".");
+            }
+            try { File.Move(fresh, exe); }
+            catch { File.Move(old, exe); throw; }   // put the running version back
+
+            Process.Start(new ProcessStartInfo(exe, "--updated") { UseShellExecute = false, WorkingDirectory = dir });
+        }
+
+        /// <summary>Removes what an update left behind (the previous exe can only go once it has exited).</summary>
+        public static void CleanUp()
+        {
+            string dir = Path.GetDirectoryName(Application.ExecutablePath);
+            foreach (string f in new[] { "HdrSwitch.old.exe", "HdrSwitch.new.exe" })
+                try { File.Delete(Path.Combine(dir, f)); } catch { }
+        }
+
+        static System.Net.WebClient Client()
+        {
+            System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
+            var web = new System.Net.WebClient();
+            web.Headers[System.Net.HttpRequestHeader.UserAgent] = "hdr-auto-switch/" + CurrentText;   // required by the GitHub API
+            return web;
+        }
+
+        static Version ThreeParts(Version v)
+        {
+            return v == null ? new Version(0, 0, 0) : new Version(v.Major, v.Minor, Math.Max(0, v.Build));
+        }
+
+        static string Text(Version v)
+        {
+            return v.Major + "." + v.Minor + "." + v.Build;
         }
     }
 
