@@ -49,13 +49,13 @@ namespace HdrSwitch
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
-                Application.Run(new TrayApp(updated));
+                Application.Run(new TrayApp(updated, args.Contains("--open")));
                 mutex.ReleaseMutex();
             }
         }
     }
 
-    sealed class TrayApp : ApplicationContext
+    sealed partial class TrayApp : ApplicationContext
     {
         const int SdrDelayMs = 3000;   // wait after the last game closes (covers launchers that restart the game)
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -67,7 +67,6 @@ namespace HdrSwitch
 
         readonly SynchronizationContext ui = SynchronizationContext.Current;
         readonly NotifyIcon tray = new NotifyIcon();
-        readonly ContextMenuStrip menu = new ContextMenuStrip();
         readonly Icon iconOn = MakeIcon(Color.FromArgb(255, 170, 0), Color.Black);
         readonly Icon iconOff = MakeIcon(Color.FromArgb(120, 120, 120), Color.White);
         readonly System.Windows.Forms.Timer sdrTimer = new System.Windows.Forms.Timer { Interval = SdrDelayMs };
@@ -84,21 +83,19 @@ namespace HdrSwitch
         bool scanning;
         readonly Dictionary<int, Running> running = new Dictionary<int, Running>();
         readonly List<Hdr.Display> owned = new List<Hdr.Display>();   // displays this app switched to HDR
-        ToolStripMenuItem status, gamesMenu, startup, updateItem;
-        static readonly object GameToggle = new object();   // Tag of the game tick items
-        bool keepOpen;
+        Flyout flyout;
         Updater.Release update;   // a newer release, once found
         bool updating;
 
-        public TrayApp(bool updated)
+        public TrayApp(bool updated, bool open)   // --open: show the flyout right away (development, screenshots)
         {
             Directory.CreateDirectory(Dir);
             Updater.CleanUp();
             bool firstRun = !File.Exists(ListFile);
             LoadList();
-            BuildMenu();
+            flyout = new Flyout(this);
 
-            tray.ContextMenuStrip = menu;
+            tray.MouseUp += (s, e) => { if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right) flyout.Toggle(); };
             tray.Visible = true;
 
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); BackToSdr(); };
@@ -133,6 +130,12 @@ namespace HdrSwitch
             trim.Start();
 
             if (updated) Notify("Updated to version " + Updater.CurrentText + ".");
+            if (open)
+            {
+                var t = new System.Windows.Forms.Timer { Interval = 500 };
+                t.Tick += (s, e) => { t.Dispose(); flyout.Toggle(); };
+                t.Start();
+            }
 
             // Updates: first look 1 minute after startup, then once a day.
             if (Updater.Enabled)
@@ -159,17 +162,15 @@ namespace HdrSwitch
         void OnUpdateFound(Updater.Release r)
         {
             update = r;
-            updateItem.Text = "Update to version " + r.VersionText;
-            updateItem.Visible = true;
-            Notify("Version " + r.VersionText + " is available – right-click the tray icon › Update.");
+            flyout.Sync();
+            Notify("Version " + r.VersionText + " is available – click the tray icon › Update.");
         }
 
         void InstallUpdate()
         {
             if (update == null || updating) return;
             updating = true;
-            updateItem.Text = "Updating…";
-            updateItem.Enabled = false;
+            flyout.Sync();
             var r = update;
             new Thread(() =>
             {
@@ -180,8 +181,7 @@ namespace HdrSwitch
                 {
                     if (error == null) { ExitThread(); return; }   // the new version is starting
                     updating = false;
-                    updateItem.Text = "Update to version " + r.VersionText;
-                    updateItem.Enabled = true;
+                    flyout.Sync();
                     Notify("Update failed: " + error);
                 }, null);
             }) { IsBackground = true }.Start();
@@ -387,6 +387,7 @@ namespace HdrSwitch
                 Notify(added.Count == 0 ? "No new games found."
                     : "Found " + added.Count + " new game" + (added.Count == 1 ? "" : "s") + ": "
                       + string.Join(", ", added.Select(f => f.Label).Take(3)) + (added.Count > 3 ? "…" : ""));
+            flyout.Sync();
             Trim();
         }
 
@@ -409,36 +410,7 @@ namespace HdrSwitch
 
         // ---- tray ----
 
-        void BuildMenu()
-        {
-            status = new ToolStripMenuItem { Enabled = false };
-            updateItem = new ToolStripMenuItem("Update", null, (s, e) => InstallUpdate()) { Visible = false, Font = new Font(menu.Font, FontStyle.Bold) };
-            gamesMenu = new ToolStripMenuItem("Games");
-            gamesMenu.DropDownItems.Add("…");   // placeholder so the submenu arrow shows
-            gamesMenu.DropDownOpening += (s, e) => FillGames();
-            startup = new ToolStripMenuItem("Start with Windows", null, (s, e) => SetStartup(!startup.Checked));
-
-            menu.Items.AddRange(new ToolStripItem[]
-            {
-                status, updateItem, new ToolStripSeparator(),
-                gamesMenu, startup, new ToolStripSeparator(),
-                new ToolStripMenuItem("Exit", null, (s, e) => ExitThread())
-            });
-            menu.Opening += (s, e) => RefreshMenu();
-            menu.Closed += (s, e) => Trim();
-
-            // Ticking games keeps the menu open, so several can be changed in one go.
-            gamesMenu.DropDown.ItemClicked += (s, e) => keepOpen = e.ClickedItem.Tag == GameToggle;
-            menu.ItemClicked += (s, e) => keepOpen = false;
-            ToolStripDropDownClosingEventHandler stayOpen = (s, e) =>
-            {
-                if (keepOpen && e.CloseReason == ToolStripDropDownCloseReason.ItemClicked) e.Cancel = true;
-            };
-            gamesMenu.DropDown.Closing += stayOpen;
-            menu.Closing += stayOpen;
-        }
-
-        /// <summary>"HDR on – Dying Light: The Beast", "Waiting for a game", …</summary>
+        /// <summary>"HDR on – Dying Light: The Beast", "Waiting for a game", … (the tray icon's tooltip).</summary>
         string StatusText()
         {
             var displays = Hdr.All();
@@ -454,45 +426,6 @@ namespace HdrSwitch
             if (l == name || l == "added by hand") return name + ".exe";
             int colon = l.IndexOf(": ");
             return colon > 0 && colon < 10 ? l.Substring(colon + 2) : l;
-        }
-
-        void RefreshMenu()
-        {
-            status.Text = StatusText();
-            gamesMenu.Text = "Games (" + games.Count + ")";
-            startup.Checked = IsStartup();
-        }
-
-        void FillGames()
-        {
-            var items = gamesMenu.DropDownItems;
-            foreach (var old in items.Cast<ToolStripItem>().ToList()) old.Dispose();
-
-            // Ticked: HDR switches for it. Unticked games stay listed so a slip is one click to undo.
-            foreach (string g in games.Concat(excluded).OrderBy(DisplayName, StringComparer.OrdinalIgnoreCase))
-            {
-                string name = g;
-                var item = new ToolStripMenuItem(DisplayName(name)) { Checked = games.Contains(name), Tag = GameToggle };
-                item.Click += (s, e) =>
-                {
-                    if (games.Contains(name)) Remove(name);
-                    else Add(name);
-                    item.Checked = games.Contains(name);
-                };
-                items.Add(item);
-            }
-            if (games.Count + excluded.Count == 0) items.Add(new ToolStripMenuItem(scanning ? "Looking for games…" : "No games found") { Enabled = false });
-            items.Add(new ToolStripSeparator());
-
-            var add = new ToolStripMenuItem("Add a running program");
-            foreach (string n in WindowedApps().Where(n => !games.Contains(n)))
-            {
-                string name = n;
-                add.DropDownItems.Add(name + ".exe", null, (s, e) => Add(name));
-            }
-            add.Enabled = add.DropDownItems.Count > 0;
-            items.Add(add);
-            items.Add(new ToolStripMenuItem(scanning ? "Looking for games…" : "Look for new games", null, (s, e) => ScanInBackground(true)) { Enabled = !scanning });
         }
 
         static IEnumerable<string> WindowedApps()
@@ -520,6 +453,7 @@ namespace HdrSwitch
             tray.Icon = Hdr.All().Any(d => d.On) ? iconOn : iconOff;
             string text = "HDR Switch " + Updater.CurrentText + "\n" + StatusText();
             tray.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;   // NotifyIcon limit
+            if (flyout != null) flyout.Sync();
         }
 
         void Notify(string text)
@@ -584,6 +518,7 @@ namespace HdrSwitch
             }
             running.Clear();
             BackToSdr();
+            flyout.Dispose();
             tray.Visible = false;
             tray.Dispose();
             base.ExitThreadCore();
@@ -1182,5 +1117,7 @@ namespace HdrSwitch
         [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
         [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
         [DllImport("kernel32.dll")] public static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
     }
 }
