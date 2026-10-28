@@ -4,7 +4,7 @@ Windows HDR turns on by itself when you start a game, and goes back to SDR a few
 
 ## Download and use
 
-1. Download **HdrSwitch.exe** from the [latest release](https://github.com/GITHUB_OWNER/hdr-auto-switch/releases/latest).
+1. Download **HdrSwitch.exe** from the [latest release](https://github.com/sxnfer/hdr-auto-switch/releases/latest).
 2. Put it in a folder that will stay put, for example `C:\Tools\HDR Switch`.
 3. Double-click it. Windows will probably say **"Windows protected your PC"**, because the app isn't code-signed. Click **More info › Run anyway**. Every release is built by GitHub from the code in this repository, and comes with its SHA256 checksum (`SHA256SUMS.txt`).
 4. An **H** icon appears in the tray (click the **^** near the clock if you don't see it). Right-click it and tick **Start with Windows**.

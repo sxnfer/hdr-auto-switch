@@ -1,4 +1,4 @@
-﻿// HDR Switch – a tiny tray app: Windows HDR turns on while a game from your list runs
+// HDR Switch – a tiny tray app: Windows HDR turns on while a game from your list runs
 // and goes back to SDR a few seconds after it closes.
 //
 // Games are found automatically (Steam, Epic, GOG, Ubisoft and game folders on every drive) and caught
@@ -598,7 +598,7 @@ namespace HdrSwitch
     /// </summary>
     static class Updater
     {
-        public const string Repo = "GITHUB_OWNER/hdr-auto-switch";
+        public const string Repo = "sxnfer/hdr-auto-switch";
         const string ExeName = "HdrSwitch.exe";
         static readonly string DownloadPrefix = "https://github.com/" + Repo + "/releases/download/";
 
