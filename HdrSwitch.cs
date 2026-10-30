@@ -473,6 +473,8 @@ namespace HdrSwitch
         /// <summary>
         /// A previous run was killed while a game had its resolution: if the desktop is still in that mode, take it over –
         /// the first Rescan adopts the running game, or the constructor puts the display back if the game is gone.
+        /// (In practice Windows drops a CDS_FULLSCREEN mode the moment the process that set it dies, so this mostly
+        /// just removes the stale file; it is here for the case where it doesn't.)
         /// </summary>
         void RecoverResolution()
         {
