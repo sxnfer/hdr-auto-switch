@@ -231,12 +231,13 @@ namespace HdrSwitch
 
             sdrTimer.Stop();
             steamTimeout.Stop();
-            // The mode first, HDR after it: a mode change is what could disturb HDR, not the other way round.
-            if (profiles.ContainsKey(name) && ApplyResolution(name) && Proc.AgeSeconds(pid) > 5 && resHinted.Add(name))
-                Notify(ResHint(name));
+            // HDR first, the mode after it: switching HDR makes Windows reapply the saved display mode, which would
+            // throw away a competitive mode set just before. A mode change leaves HDR alone.
             if (games.Contains(name) && SwitchOn() && Proc.AgeSeconds(pid) > 5 && hinted.Add(name))
                 Notify("HDR came on after " + DisplayName(name) + " had already started. "
                     + "If its HDR option is greyed out, restart the game.");
+            if (profiles.ContainsKey(name) && ApplyResolution(name) && Proc.AgeSeconds(pid) > 5 && resHinted.Add(name))
+                Notify(ResHint(name));
             if (NeedsSettling()) sdrTimer.Start();   // e.g. HDR was about to go off when a game that only has a resolution started
             UpdateTray();
         }
@@ -249,8 +250,8 @@ namespace HdrSwitch
             string name = games.Concat(profiles.Keys).FirstOrDefault(g => LabelOf(g) == label);
             if (name == null) return;
             sdrTimer.Stop();
+            if (games.Contains(name)) SwitchOn();                  // HDR first – see Track
             if (profiles.ContainsKey(name)) ApplyResolution(name);
-            if (games.Contains(name)) SwitchOn();
             steamTimeout.Stop();
             steamTimeout.Start();   // back to normal if the game doesn't show up within a minute
             UpdateTray();
@@ -280,12 +281,13 @@ namespace HdrSwitch
         /// <summary>After the grace period: whatever no running game needs any more goes back – SDR, the saved mode.</summary>
         void Settle()
         {
-            if (!HdrRunning())
+            if (!ProfiledRunning()) RevertResolution();   // the mode first: switching HDR off resets the mode anyway
+            if (!HdrRunning() && owned.Count > 0)
             {
                 foreach (var d in owned) Hdr.Set(d, false);
                 owned.Clear();
+                KeepMode();   // a game with only a resolution may still be running
             }
-            if (!ProfiledRunning()) RevertResolution();
             UpdateTray();
         }
 
@@ -326,7 +328,18 @@ namespace HdrSwitch
             if (d == null || d.On) return false;   // no HDR display, or HDR already on (not ours to switch back)
             if (!Hdr.Set(d, true)) return false;
             if (!owned.Any(o => o.Key == d.Key)) owned.Add(d);
+            KeepMode();   // e.g. an HDR game started while another game has its competitive resolution
             return true;
+        }
+
+        /// <summary>
+        /// Switching HDR on or off makes Windows reapply the display mode saved in settings, which drops the competitive
+        /// mode. Put it back – this is our own HDR switch undoing our own mode, not the user changing it.
+        /// </summary>
+        void KeepMode()
+        {
+            if (res == null || res.Mode.Same(Resolution.Current(res.Gdi))) return;
+            Resolution.Apply(res.Gdi, res.Mode.Width, res.Mode.Height, res.Mode.Hz);
         }
 
         /// <summary>A mode change can take HDR down with it: put back what this app owns.</summary>
