@@ -5,6 +5,10 @@
 // as soon as their process starts – Steam games even earlier, the moment Play is pressed – so HDR is on
 // before the game checks for it. Only HDR this app turned on is ever switched back off.
 //
+// A game can also have a competitive resolution (resolutions.txt): while it runs the desktop switches to a
+// smaller mode shown 1:1 in the middle of the panel, and goes back to the saved mode after it closes. Same
+// rules: temporary, and only a mode this app set is ever put back.
+//
 // Build with build.cmd (uses the C# compiler that ships with Windows / .NET Framework 4.8).
 
 using System;
@@ -62,8 +66,11 @@ namespace HdrSwitch
         const string RunValue = "HDR Switch";
         static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "HdrSwitch");
         static readonly string ListFile = Path.Combine(Dir, "games.txt");
+        static readonly string ProfilesFile = Path.Combine(Dir, "resolutions.txt");
+        static readonly string StateFile = Path.Combine(Dir, "resolution.state");   // the mode this app set – for crash recovery
 
         sealed class Running { public string Name; public RegisteredWaitHandle Wait; public WaitHandle Handle; }
+        sealed class ActiveMode { public string Gdi; public Resolution.Mode Mode, Back; public string Game; }   // Back: the saved mode it returns to
 
         readonly SynchronizationContext ui = SynchronizationContext.Current;
         readonly NotifyIcon tray = new NotifyIcon();
@@ -72,17 +79,25 @@ namespace HdrSwitch
         readonly System.Windows.Forms.Timer sdrTimer = new System.Windows.Forms.Timer { Interval = SdrDelayMs };
         readonly System.Windows.Forms.Timer scanTimer = new System.Windows.Forms.Timer { Interval = 1000 };     // catches games as their process starts
         readonly System.Windows.Forms.Timer steamTimeout = new System.Windows.Forms.Timer { Interval = 60000 }; // Play pressed, but no game appeared
-        readonly System.Windows.Forms.Timer reloadTimer = new System.Windows.Forms.Timer { Interval = 300 };   // debounces edits to games.txt
+        readonly System.Windows.Forms.Timer reloadTimer = new System.Windows.Forms.Timer { Interval = 300 };   // debounces edits to games.txt / resolutions.txt
+        readonly System.Windows.Forms.Timer modeCheck = new System.Windows.Forms.Timer { Interval = 2000 };   // the display changed under us: still our mode?
         readonly FileSystemWatcher watcher;
         readonly SteamWatcher steam;
-        readonly HashSet<string> hinted = new HashSet<string>();   // games already told "restart if HDR is greyed out"
+        readonly EventHandler onDisplayChanged;
+        readonly HashSet<string> hinted = new HashSet<string>();      // games already told "restart if HDR is greyed out"
+        readonly HashSet<string> resHinted = new HashSet<string>();   // games already told "restart if it doesn't fit"
+        readonly HashSet<string> resFailed = new HashSet<string>();   // games already told their resolution doesn't exist
+        bool resWarned;                                               // told once that the driver isn't centring
 
         HashSet<string> games = new HashSet<string>();
         HashSet<string> excluded = new HashSet<string>();                 // "-name.exe" lines: never switch, never re-added by a scan
         Dictionary<string, string> labels = new Dictionary<string, string>();   // name → note shown in the list ("Steam: Cyberpunk 2077")
+        Dictionary<string, Resolution.Mode> profiles = new Dictionary<string, Resolution.Mode>();   // name → competitive resolution (Hz 0: current rate)
+        Dictionary<string, string> profileLabels = new Dictionary<string, string>();               // notes from resolutions.txt, used if games.txt has none
         bool scanning;
         readonly Dictionary<int, Running> running = new Dictionary<int, Running>();
         readonly List<Hdr.Display> owned = new List<Hdr.Display>();   // displays this app switched to HDR
+        ActiveMode res;                                               // the competitive mode this app set, while it is set
         Flyout flyout;
         Updater.Release update;   // a newer release, once found
         bool updating;
@@ -93,17 +108,19 @@ namespace HdrSwitch
             Updater.CleanUp();
             bool firstRun = !File.Exists(ListFile);
             LoadList();
+            LoadProfiles();
             flyout = new Flyout(this);
 
             tray.MouseUp += (s, e) => { if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right) flyout.Toggle(); };
             tray.Visible = true;
 
-            sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); BackToSdr(); };
+            sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); Settle(); };
             scanTimer.Tick += (s, e) => Rescan();
-            steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); if (running.Count == 0) BackToSdr(); };
-            reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); ForgetRemoved(); Rescan(); };
+            steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); Settle(); };
+            reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
+            modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };
 
-            watcher = new FileSystemWatcher(Dir, "games.txt") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size };
+            watcher = new FileSystemWatcher(Dir, "*.txt") { NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.Size };
             FileSystemEventHandler changed = (s, e) => ui.Post(_ => { reloadTimer.Stop(); reloadTimer.Start(); }, null);
             watcher.Changed += changed;
             watcher.Created += changed;
@@ -111,8 +128,12 @@ namespace HdrSwitch
             watcher.EnableRaisingEvents = true;
 
             steam = new SteamWatcher(id => ui.Post(_ => OnSteamStarted(id), null));
+            onDisplayChanged = (s, e) => ui.Post(_ => OnDisplayChanged(true), null);
+            SystemEvents.DisplaySettingsChanged += onDisplayChanged;
 
-            Rescan();   // games that were already running
+            RecoverResolution();   // a previous run was killed while a game had its resolution
+            Rescan();              // games that were already running
+            if (res != null && !running.Values.Any(r => profiles.ContainsKey(r.Name))) RevertResolution();
             scanTimer.Start();
             UpdateTray();
 
@@ -189,7 +210,13 @@ namespace HdrSwitch
 
         // ---- game tracking ----
 
-        /// <summary>Follows a running game from the list: HDR on now, back to SDR once it closes.</summary>
+        /// <summary>A game is followed if it is on the HDR list or has a competitive resolution.</summary>
+        bool Followed(string name) { return games.Contains(name) || profiles.ContainsKey(name); }
+
+        bool HdrRunning() { return running.Values.Any(r => games.Contains(r.Name)); }
+        bool ProfiledRunning() { return running.Values.Any(r => profiles.ContainsKey(r.Name)); }
+
+        /// <summary>Follows a running game: its resolution and/or HDR now, back once it closes.</summary>
         void Track(int pid, string name)
         {
             IntPtr h = Proc.OpenForWait(pid);
@@ -204,21 +231,28 @@ namespace HdrSwitch
 
             sdrTimer.Stop();
             steamTimeout.Stop();
-            if (SwitchOn() && Proc.AgeSeconds(pid) > 5 && hinted.Add(name))
+            // The mode first, HDR after it: a mode change is what could disturb HDR, not the other way round.
+            if (profiles.ContainsKey(name) && ApplyResolution(name) && Proc.AgeSeconds(pid) > 5 && resHinted.Add(name))
+                Notify(ResHint(name));
+            if (games.Contains(name) && SwitchOn() && Proc.AgeSeconds(pid) > 5 && hinted.Add(name))
                 Notify("HDR came on after " + DisplayName(name) + " had already started. "
                     + "If its HDR option is greyed out, restart the game.");
+            if (NeedsSettling()) sdrTimer.Start();   // e.g. HDR was about to go off when a game that only has a resolution started
             UpdateTray();
         }
 
-        /// <summary>Steam says Play was pressed: for a game from the list, HDR goes on before the game even starts.</summary>
+        /// <summary>Steam says Play was pressed: for a game from the list, the switch happens before the game even starts.</summary>
         void OnSteamStarted(int appId)
         {
             string label = GameScanner.SteamLabel(appId);
-            if (label == null || !games.Any(g => LabelOf(g) == label)) return;
+            if (label == null) return;
+            string name = games.Concat(profiles.Keys).FirstOrDefault(g => LabelOf(g) == label);
+            if (name == null) return;
             sdrTimer.Stop();
-            SwitchOn();
+            if (profiles.ContainsKey(name)) ApplyResolution(name);
+            if (games.Contains(name)) SwitchOn();
             steamTimeout.Stop();
-            steamTimeout.Start();   // back to SDR if the game doesn't show up within a minute
+            steamTimeout.Start();   // back to normal if the game doesn't show up within a minute
             UpdateTray();
         }
 
@@ -232,7 +266,26 @@ namespace HdrSwitch
                 r.Wait.Unregister(null);
                 r.Handle.Dispose();
             }
-            if (running.Count == 0) sdrTimer.Start();
+            if (NeedsSettling()) sdrTimer.Start();
+            UpdateTray();
+        }
+
+        /// <summary>Something this app switched is no longer needed by a running game – and Steam isn't about to start one.</summary>
+        bool NeedsSettling()
+        {
+            if (steamTimeout.Enabled) return false;
+            return (owned.Count > 0 && !HdrRunning()) || (res != null && !ProfiledRunning());
+        }
+
+        /// <summary>After the grace period: whatever no running game needs any more goes back – SDR, the saved mode.</summary>
+        void Settle()
+        {
+            if (!HdrRunning())
+            {
+                foreach (var d in owned) Hdr.Set(d, false);
+                owned.Clear();
+            }
+            if (!ProfiledRunning()) RevertResolution();
             UpdateTray();
         }
 
@@ -244,23 +297,23 @@ namespace HdrSwitch
         void Rescan()
         {
             bool unwaitable = running.Values.Any(r => r.Wait == null);
-            if (games.Count == 0 && !unwaitable) return;
+            if (games.Count == 0 && profiles.Count == 0 && !unwaitable) return;
 
             var alive = new HashSet<int>();
             foreach (var p in Proc.Snapshot())
             {
                 alive.Add(p.Key);
-                if (games.Contains(p.Value) && !running.ContainsKey(p.Key)) Track(p.Key, p.Value);
+                if (Followed(p.Value) && !running.ContainsKey(p.Key)) Track(p.Key, p.Value);
             }
             if (unwaitable)
                 foreach (int pid in running.Where(kv => kv.Value.Wait == null && !alive.Contains(kv.Key)).Select(kv => kv.Key).ToList())
                     Exited(pid);
         }
 
-        /// <summary>Stops following running games that were taken off the list.</summary>
+        /// <summary>Stops following running games that were taken off both lists.</summary>
         void ForgetRemoved()
         {
-            foreach (int pid in running.Where(kv => !games.Contains(kv.Value.Name)).Select(kv => kv.Key).ToList())
+            foreach (int pid in running.Where(kv => !Followed(kv.Value.Name)).Select(kv => kv.Key).ToList())
                 Exited(pid);
         }
 
@@ -276,12 +329,241 @@ namespace HdrSwitch
             return true;
         }
 
-        void BackToSdr()
+        /// <summary>A mode change can take HDR down with it: put back what this app owns.</summary>
+        void KeepHdr()
         {
-            if (running.Count > 0) return;
-            foreach (var d in owned) Hdr.Set(d, false);
-            owned.Clear();
+            if (owned.Count == 0) return;
+            var all = Hdr.All();
+            foreach (var o in owned)
+            {
+                var d = all.FirstOrDefault(x => x.Key == o.Key);
+                if (d != null && !d.On) Hdr.Set(d, true);
+            }
+        }
+
+        // ---- competitive resolution ----
+
+        /// <summary>The display the HDR feature uses; the main display if none can do HDR.</summary>
+        static string TargetGdi()
+        {
+            var d = Hdr.Primary();
+            return d != null && d.Gdi.Length > 0 ? d.Gdi : Screen.PrimaryScreen.DeviceName;
+        }
+
+        /// <summary>"2368 × 1332", or "2368 × 1332 @ 240 Hz" when the profile names a rate.</summary>
+        static string ProfileText(Resolution.Mode p)
+        {
+            return p.Hz > 0 ? p.Text + " @ " + p.Hz + " Hz" : p.Text;
+        }
+
+        string ResHint(string name)
+        {
+            return "The screen switched to " + res.Mode.Text + " after " + DisplayName(name) + " had already started. "
+                + "If the game doesn't fit the screen, restart it.";
+        }
+
+        /// <summary>
+        /// Switches the desktop to a game's competitive resolution. The first profiled game to start sets it and it stays
+        /// until no profiled game runs. True if the mode was switched just now.
+        /// </summary>
+        bool ApplyResolution(string name)
+        {
+            Resolution.Mode p;
+            if (!profiles.TryGetValue(name, out p)) return false;
+            if (res != null)
+            {
+                if (res.Game.Length == 0) res.Game = name;   // taken over from a previous run (see RecoverResolution)
+                return false;
+            }
+            string gdi = TargetGdi();
+            var now = Resolution.Current(gdi);
+            if (now == null) return false;
+            var mode = new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = p.Hz > 0 ? p.Hz : now.Hz };
+            if (mode.Same(now)) return false;   // already in that mode (set by hand): not ours to switch back
+            if (!Resolution.Available(gdi, mode.Width, mode.Height, mode.Hz))
+            {
+                if (resFailed.Add(name))
+                    Notify("No " + mode.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ". Create " + mode.Width + "×" + mode.Height
+                        + " at " + mode.Hz + " Hz as a custom resolution in NVIDIA Control Panel (Change resolution › Customize).");
+                return false;
+            }
+            var before = Resolution.Read(gdi);
+            if (!Resolution.Apply(gdi, mode.Width, mode.Height, mode.Hz))
+            {
+                if (resFailed.Add(name)) Notify("Windows didn't switch to " + mode.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
+                return false;
+            }
+            res = new ActiveMode { Gdi = gdi, Mode = mode, Back = Resolution.Saved(gdi) ?? now, Game = name };
+            SaveState();
+            KeepHdr();
+
+            // The panel should still get its native signal, with the smaller desktop centred in it.
+            var after = Resolution.Read(gdi);
+            if (!resWarned && before != null && after != null)
+            {
+                if (after.TargetW != before.TargetW || after.TargetH != before.TargetH)
+                {
+                    resWarned = true;
+                    Notify("The monitor is scaling " + mode.Text + " itself. In NVIDIA Control Panel › Adjust desktop size and position, "
+                        + "choose No scaling and Perform scaling on: GPU.");
+                }
+                else if (!after.Centered)
+                {
+                    resWarned = true;
+                    Notify(mode.Text + " is being stretched. In NVIDIA Control Panel › Adjust desktop size and position, "
+                        + "choose No scaling and untick Override the scaling mode.");
+                }
+            }
+            return true;
+        }
+
+        /// <summary>Back to the saved mode – but only if the desktop is still in the mode this app set.</summary>
+        void RevertResolution()
+        {
+            if (res == null) return;
+            var r = res;
+            res = null;
+            DeleteState();
+            if (!r.Mode.Same(Resolution.Current(r.Gdi))) return;   // changed meanwhile (settings, sleep, …): not ours any more
+            Resolution.Restore(r.Gdi);
+            KeepHdr();
+        }
+
+        /// <summary>
+        /// Windows says the display settings changed. If the desktop isn't in our mode any more (display settings, sleep and
+        /// resume…), it isn't ours to put back. Checked again 2 s later first, in case the change was a transient one.
+        /// </summary>
+        void OnDisplayChanged(bool first)
+        {
+            if (res != null && !res.Mode.Same(Resolution.Current(res.Gdi)))
+            {
+                if (first) { modeCheck.Stop(); modeCheck.Start(); return; }
+                res = null;
+                DeleteState();
+            }
             UpdateTray();
+        }
+
+        /// <summary>Profiles changed while games run: a new or changed one applies at once, a removed one goes back.</summary>
+        void ReapplyProfiles()
+        {
+            if (res != null)
+            {
+                Resolution.Mode p;
+                bool keep = profiles.TryGetValue(res.Game, out p) && p.Width == res.Mode.Width && p.Height == res.Mode.Height && (p.Hz == 0 || p.Hz == res.Mode.Hz);
+                if (!keep) RevertResolution();
+            }
+            foreach (var r in running.Values.ToList())
+                if (profiles.ContainsKey(r.Name) && ApplyResolution(r.Name) && resHinted.Add(r.Name))
+                    Notify(ResHint(r.Name));
+            UpdateTray();
+        }
+
+        void SaveState()
+        {
+            try { File.WriteAllText(StateFile, res.Gdi + "|" + res.Mode.Width + "|" + res.Mode.Height + "|" + res.Mode.Hz); }
+            catch (IOException) { }
+        }
+
+        void DeleteState()
+        {
+            try { File.Delete(StateFile); } catch (IOException) { }
+        }
+
+        /// <summary>
+        /// A previous run was killed while a game had its resolution: if the desktop is still in that mode, take it over –
+        /// the first Rescan adopts the running game, or the constructor puts the display back if the game is gone.
+        /// </summary>
+        void RecoverResolution()
+        {
+            string text;
+            try
+            {
+                if (!File.Exists(StateFile)) return;
+                text = File.ReadAllText(StateFile);
+            }
+            catch (IOException) { return; }
+            string[] f = text.Trim().Split('|');
+            int w, h, hz;
+            if (f.Length != 4 || !int.TryParse(f[1], out w) || !int.TryParse(f[2], out h) || !int.TryParse(f[3], out hz)) { DeleteState(); return; }
+            var mode = new Resolution.Mode { Width = w, Height = h, Hz = hz };
+            if (!mode.Same(Resolution.Current(f[0]))) { DeleteState(); return; }   // a reboot or the user already put it back
+            res = new ActiveMode { Gdi = f[0], Mode = mode, Back = Resolution.Saved(f[0]), Game = "" };
+        }
+
+        void LoadProfiles()
+        {
+            if (!File.Exists(ProfilesFile)) SaveProfiles();
+            string[] lines;
+            try { lines = File.ReadAllLines(ProfilesFile); }
+            catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
+
+            var newProfiles = new Dictionary<string, Resolution.Mode>();
+            var newLabels = new Dictionary<string, string>();
+            foreach (string raw in lines)
+            {
+                string line = raw, label = "";
+                int hash = line.IndexOf('#');
+                if (hash >= 0)
+                {
+                    label = line.Substring(hash + 1).Trim();
+                    line = line.Substring(0, hash);
+                }
+                var m = ProfileLine.Match(line.Trim());
+                if (!m.Success) continue;
+                string name = Proc.Normalize(m.Groups[1].Value);
+                if (name == null) continue;
+                var p = new Resolution.Mode
+                {
+                    Width = int.Parse(m.Groups[2].Value), Height = int.Parse(m.Groups[3].Value),
+                    Hz = m.Groups[4].Success ? int.Parse(m.Groups[4].Value) : 0
+                };
+                if (p.Width < 320 || p.Height < 200) continue;
+                newProfiles[name] = p;
+                if (label.Length > 0) newLabels[name] = label;
+            }
+            foreach (var kv in newProfiles)   // a changed line gets its "doesn't exist" notice again
+            {
+                Resolution.Mode old;
+                if (!profiles.TryGetValue(kv.Key, out old) || !old.Same(kv.Value)) resFailed.Remove(kv.Key);
+            }
+            profiles = newProfiles;
+            profileLabels = newLabels;
+        }
+
+        // "cs2.exe  2368x1332", "cs2.exe 2368 × 1332 @ 240" (the note after # is already gone)
+        static readonly Regex ProfileLine = new Regex(@"^(.+?)\s+(\d{3,5})\s*[x×]\s*(\d{3,5})(?:\s*@\s*(\d{2,4})(?:\s*hz)?)?$", RegexOptions.IgnoreCase);
+
+        void SaveProfiles()
+        {
+            var lines = new List<string>
+            {
+                "# HDR Switch - competitive resolutions. While one of these games runs, the screen switches to this",
+                "# resolution, shown 1:1 in the middle with black borders, and goes back when the game closes.",
+                "# One game per line: exe, resolution, optional @refresh rate (otherwise the current one). Text after # is a note.",
+                "# The resolution must be in Windows' list: create it in NVIDIA Control Panel > Change resolution > Customize.",
+                "# Easier: click the tray icon, then the monitor symbol next to a game. Changes apply as soon as you save.",
+                ""
+            };
+            lines.AddRange(profiles.Keys.OrderBy(LabelOf, StringComparer.OrdinalIgnoreCase).Select(g =>
+            {
+                string line = (g + ".exe").PadRight(35) + " " + (profiles[g].Width + "x" + profiles[g].Height + (profiles[g].Hz > 0 ? "@" + profiles[g].Hz : "")).PadRight(16);
+                string l = LabelOf(g);
+                return l == g ? line.TrimEnd() : line + " # " + l;
+            }));
+            try { File.WriteAllLines(ProfilesFile, lines, Encoding.UTF8); } catch (IOException) { }
+        }
+
+        /// <summary>From the flyout: this game's resolution (null: off). Saved, and applied right away if the game runs.</summary>
+        void SetProfile(string name, Resolution.Mode mode)
+        {
+            if (mode == null) profiles.Remove(name);
+            else profiles[name] = mode;
+            resFailed.Remove(name);
+            SaveProfiles();
+            ForgetRemoved();
+            Rescan();
+            ReapplyProfiles();
         }
 
         // ---- game list ----
@@ -342,7 +624,8 @@ namespace HdrSwitch
         string LabelOf(string name)
         {
             string l;
-            return labels.TryGetValue(name, out l) && l.Length > 0 ? l : name;
+            if (labels.TryGetValue(name, out l) && l.Length > 0) return l;
+            return profileLabels.TryGetValue(name, out l) && l.Length > 0 ? l : name;
         }
 
         string ListLine(string name, bool off)
@@ -410,13 +693,20 @@ namespace HdrSwitch
 
         // ---- tray ----
 
-        /// <summary>"HDR on – Dying Light: The Beast", "Waiting for a game", … (the tray icon's tooltip).</summary>
+        /// <summary>
+        /// "HDR on – Dying Light: The Beast", "Waiting for a game", … (the tray icon's tooltip), with a second line
+        /// such as "2368 × 1332 – Counter-Strike 2" while a competitive resolution is set.
+        /// </summary>
         string StatusText()
         {
             var displays = Hdr.All();
-            if (!displays.Any(d => d.Supported)) return "No HDR display found";
-            if (running.Count > 0) return "HDR on – " + string.Join(", ", running.Values.Select(r => DisplayName(r.Name)).Distinct());
-            return displays.Any(d => d.On) ? "HDR is on" : "Waiting for a game";
+            var hdrGames = running.Values.Where(r => games.Contains(r.Name)).Select(r => DisplayName(r.Name)).Distinct().ToList();
+            string hdr = !displays.Any(d => d.Supported) ? "No HDR display found"
+                : hdrGames.Count > 0 ? "HDR on – " + string.Join(", ", hdrGames)
+                : displays.Any(d => d.On) ? "HDR is on" : "Waiting for a game";
+            if (res == null) return hdr;
+            string mode = res.Mode.Text + " – " + DisplayName(res.Game);
+            return hdrGames.Count > 0 || displays.Any(d => d.On) ? hdr + "\n" + mode : mode;   // "Waiting for a game" adds nothing here
         }
 
         /// <summary>"Dying Light: The Beast" (launcher name without "Steam: "), or "game.exe".</summary>
@@ -510,14 +800,17 @@ namespace HdrSwitch
         {
             watcher.Dispose();
             steam.Dispose();
+            SystemEvents.DisplaySettingsChanged -= onDisplayChanged;
             scanTimer.Stop();
+            sdrTimer.Stop();
+            steamTimeout.Stop();
             foreach (var r in running.Values.Where(x => x.Wait != null))
             {
                 r.Wait.Unregister(null);
                 r.Handle.Dispose();
             }
             running.Clear();
-            BackToSdr();
+            Settle();   // SDR and the saved mode, whatever is still running
             flyout.Dispose();
             tray.Visible = false;
             tray.Dispose();

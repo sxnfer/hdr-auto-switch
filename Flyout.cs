@@ -53,11 +53,12 @@ namespace HdrSwitch
             readonly Font body, bodyStrong, caption, titleFont, badgeFont, glyph, glyphSmall;
             readonly ToolTip tip = new ToolTip { InitialDelay = 600 };
             readonly List<Item> items = new List<Item>();
-            readonly TextFormatFlags TfLeft, TfCenter;
+            readonly TextFormatFlags TfLeft, TfCenter, TfCaption;   // TfCaption: right-aligned, never shortened
             Rectangle listClip;
             int scroll, scrollMax, rowH;
             int hover = -1, pressed = -1;
-            bool picking;   // the list shows running programs to add, instead of the games
+            bool picking;     // the list shows running programs to add, instead of the games
+            string choosing;  // the list shows the resolutions for this game, instead of the games
             int hiddenAt = -100000;
             readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 10 };
             Stopwatch clock;
@@ -94,6 +95,7 @@ namespace HdrSwitch
                 const TextFormatFlags Base = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter;
                 TfLeft = Base | TextFormatFlags.Left;
                 TfCenter = Base | TextFormatFlags.HorizontalCenter;
+                TfCaption = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.Right;
 
                 anim.Tick += (s, e) => Slide();
             }
@@ -111,6 +113,7 @@ namespace HdrSwitch
             void Open()
             {
                 picking = false;
+                choosing = null;
                 scroll = 0;
                 Rebuild();
                 Point offset;
@@ -253,47 +256,95 @@ namespace HdrSwitch
                     () => { picking = true; scroll = 0; Rebuild(); });
                 y = c2.Bottom + M;
 
-                // The list: games with a switch each, or running programs to add.
+                // The list: games with a switch each, running programs to add, or the resolutions for one game.
                 int headH = S(44);
                 rowH = S(40);
-                List<string> names = picking
-                    ? WindowedApps().Where(n => !app.games.Contains(n)).ToList()
-                    : app.games.Concat(app.excluded).OrderBy(app.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
-                int visible = Math.Max(1, Math.Min(6, names.Count));
-                var c3 = new Rectangle(M, y, W - 2 * M, headH + visible * rowH + S(6));
+                var names = new List<string>();
+                var modes = new List<Resolution.Mode>();   // choosing: null for "Off", then the display's sizes
+                Resolution.Mode chosen = null, full = null;
+                double inches = 0;
+                int hz = 0;
+                if (picking) names = WindowedApps().Where(n => !app.games.Contains(n)).ToList();
+                else if (choosing != null)
+                {
+                    string gdi = TargetGdi();
+                    var cur = Resolution.Current(gdi);
+                    app.profiles.TryGetValue(choosing, out chosen);
+                    hz = chosen != null && chosen.Hz > 0 ? chosen.Hz : cur != null ? cur.Hz : 60;
+                    var pic = Resolution.Read(gdi);   // the panel's own size is the target of the display path
+                    full = pic != null ? new Resolution.Mode { Width = pic.TargetW, Height = pic.TargetH, Hz = hz } : cur;
+                    inches = Resolution.Inches(gdi);
+                    modes.Add(null);
+                    if (full != null)
+                        modes.AddRange(Resolution.Modes(gdi, hz)
+                            .Where(m => m.Width < full.Width || m.Height < full.Height)
+                            .OrderBy(m => SameAspect(m, full) ? 0 : 1).ThenByDescending(m => (long)m.Width * m.Height));
+                }
+                else names = app.games.Concat(app.excluded).Concat(app.profiles.Keys).Distinct().OrderBy(app.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
+                int count = choosing != null ? modes.Count : names.Count;
+                int visible = Math.Max(1, Math.Min(6, count));
+                int footH = choosing != null ? S(44) : S(6);
+                var c3 = new Rectangle(M, y, W - 2 * M, headH + visible * rowH + footH);
                 AddCard(c3);
-                if (picking)
+                if (picking || choosing != null)
                 {
                     var back = new Rectangle(c3.X + S(10), c3.Y + S(6), S(32), S(32));
-                    items.Add(new Item { Rect = back, Click = () => { picking = false; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
+                    items.Add(new Item { Rect = back, Click = () => { picking = false; choosing = null; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
                     {
                         if (st > 0) FillRound(g, rc, S(4), st == 2 ? RowPress : RowHover);
                         Draw(g, "", glyph, Text1, rc, TfCenter);
                     } });
+                    string head = picking ? "Add a running program" : app.DisplayName(choosing);
+                    string headRight = picking ? "" : "at " + hz + " Hz";
                     items.Add(new Item { Rect = c3, Paint = (g, rc, st) =>
-                        Draw(g, "Add a running program", bodyStrong, Text1, new Rectangle(rc.X + S(50), rc.Y, rc.Width - S(50) - CP, headH), TfLeft) });
+                    {
+                        Draw(g, head, bodyStrong, Text1, new Rectangle(rc.X + S(50), rc.Y, rc.Width - S(50) - CP - S(70), headH), TfLeft);
+                        Draw(g, headRight, caption, Text3, new Rectangle(rc.X + CP, rc.Y, rc.Width - 2 * CP, headH), TfLeft | TextFormatFlags.Right);
+                    } });
                 }
                 else
                 {
-                    int count = app.games.Count;
+                    int onCount = app.games.Count;
                     items.Add(new Item { Rect = c3, Paint = (g, rc, st) =>
                     {
                         Draw(g, "Games", bodyStrong, Text1, new Rectangle(rc.X + CP, rc.Y, rc.Width - 2 * CP, headH), TfLeft);
-                        Draw(g, count + " on", caption, Text3, new Rectangle(rc.X + CP, rc.Y, rc.Width - 2 * CP, headH), TfLeft | TextFormatFlags.Right);
+                        Draw(g, onCount + " on", caption, Text3, new Rectangle(rc.X + CP, rc.Y, rc.Width - 2 * CP, headH), TfLeft | TextFormatFlags.Right);
                     } });
                 }
                 listClip = new Rectangle(c3.X + 1, c3.Y + headH, c3.Width - 2, visible * rowH);
-                scrollMax = Math.Max(0, names.Count * rowH - listClip.Height);
+                scrollMax = Math.Max(0, count * rowH - listClip.Height);
                 scroll = Math.Max(0, Math.Min(scroll, scrollMax));
-                if (names.Count == 0)
+                if (count == 0)
                 {
                     string msg = picking ? "Nothing else with a window is running" : app.scanning ? "Looking for games…" : "No games found";
                     items.Add(new Item { Rect = listClip, Paint = (g, rc, st) => Draw(g, msg, body, Text3, rc, TfCenter) });
                 }
-                for (int i = 0; i < names.Count; i++)
+                for (int i = 0; i < count; i++)
                 {
-                    string name = names[i];
                     var rr = new Rectangle(c3.X, listClip.Y + i * rowH, c3.Width, rowH);
+                    if (choosing != null)
+                    {
+                        var m = modes[i];
+                        string game = choosing;
+                        int keepHz = chosen != null ? chosen.Hz : 0;
+                        bool isChosen = m == null ? chosen == null : chosen != null && m.Width == chosen.Width && m.Height == chosen.Height;
+                        string label = m == null ? "Off" : m.Text;
+                        string detail = m == null ? (full == null ? "" : full.Text + " · the whole screen") : SizeText(m, full, inches);
+                        items.Add(new Item { Rect = rr, Scrolls = true, Click = () =>
+                        {
+                            choosing = null; scroll = 0;
+                            app.SetProfile(game, m == null ? null : new Resolution.Mode { Width = m.Width, Height = m.Height, Hz = keepHz });
+                            Rebuild();
+                        }, Paint = (g, rc, st) =>
+                        {
+                            RowBg(g, rc, st);
+                            Draw(g, label, body, Text1, new Rectangle(rc.X + CP, rc.Y, S(120), rowH), TfLeft);
+                            Draw(g, detail, caption, Text3, new Rectangle(rc.X + CP + S(120), rc.Y, rc.Width - 2 * CP - S(120) - S(28), rowH), TfLeft | TextFormatFlags.Right);
+                            if (isChosen) Draw(g, "", glyphSmall, accent, new Rectangle(rc.Right - CP - S(20), rc.Y, S(20), rowH), TfCenter);
+                        } });
+                        continue;
+                    }
+                    string name = names[i];
                     if (picking)
                         items.Add(new Item { Rect = rr, Scrolls = true, Click = () => { app.Add(name); picking = false; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
                         {
@@ -304,13 +355,33 @@ namespace HdrSwitch
                     else
                     {
                         bool isOn = app.games.Contains(name);
+                        Resolution.Mode prof;
+                        app.profiles.TryGetValue(name, out prof);
+                        string cap = prof == null ? null : ProfileText(prof);
+                        int capW = cap == null ? 0 : TextRenderer.MeasureText(cap, caption, new Size(int.MaxValue, rowH), TfCaption).Width + S(10);
+                        int monX = rr.Right - CP - S(40) - S(8) - S(32);   // the monitor symbol, left of the switch
+                        var mon = new Rectangle(monX, rr.Y + (rowH - S(32)) / 2, S(32), S(32));
                         items.Add(new Item { Rect = rr, Scrolls = true, Click = () => { if (app.games.Contains(name)) app.Remove(name); else app.Add(name); Rebuild(); }, Paint = (g, rc, st) =>
                         {
                             RowBg(g, rc, st);
-                            Draw(g, app.DisplayName(name), body, isOn ? Text1 : Text2, new Rectangle(rc.X + CP, rc.Y, rc.Width - 2 * CP - S(52), rowH), TfLeft);
+                            int right = rc.X + (monX - rr.X) - S(4);
+                            if (cap != null) Draw(g, cap, caption, Text3, new Rectangle(right - capW, rc.Y, capW, rowH), TfCaption);
+                            Draw(g, app.DisplayName(name), body, isOn ? Text1 : Text2, new Rectangle(rc.X + CP, rc.Y, right - capW - rc.X - CP, rowH), TfLeft);
                             Switch(g, new Rectangle(rc.Right - CP - S(40), rc.Y + (rowH - S(20)) / 2, S(40), S(20)), isOn, st);
                         } });
+                        // The monitor symbol opens the game's resolution view; lit when it has one.
+                        items.Add(new Item { Rect = mon, Scrolls = true, Tip = "Competitive resolution", Click = () => { choosing = name; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
+                        {
+                            if (st > 0) FillRound(g, rc, S(4), st == 2 ? RowPress : RowHover);
+                            Draw(g, "", glyph, prof != null ? accent : st > 0 ? Text1 : Text3, rc, TfCenter);
+                        } });
                     }
+                }
+                if (choosing != null)
+                {
+                    string note = "Missing one? Create it as a custom resolution in NVIDIA Control Panel (Change resolution › Customize), at " + hz + " Hz.";
+                    items.Add(new Item { Rect = new Rectangle(c3.X + CP, listClip.Bottom + S(2), c3.Width - 2 * CP, footH - S(6)), Paint = (g, rc, st) =>
+                        Draw(g, note, caption, Text3, rc, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.VerticalCenter) });
                 }
                 y = c3.Bottom + M;
 
@@ -329,10 +400,11 @@ namespace HdrSwitch
                     Draw(g, "Exit", body, Text1, new Rectangle(rc.X + S(12) + S(16) + S(6), rc.Y, rc.Width, rc.Height), TfLeft);
                 } });
                 var edit = new Rectangle(exit.X - S(6) - S(32), exit.Y, S(32), S(32));
-                items.Add(new Item { Rect = edit, Tip = "Edit the game list (games.txt)", Click = () =>
+                string file = choosing != null ? ProfilesFile : ListFile;
+                items.Add(new Item { Rect = edit, Tip = choosing != null ? "Edit the resolutions (resolutions.txt)" : "Edit the game list (games.txt)", Click = () =>
                 {
                     Dismiss();
-                    try { Process.Start("notepad.exe", "\"" + ListFile + "\""); } catch { }
+                    try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
                 }, Paint = (g, rc, st) =>
                 {
                     if (st > 0) FillRound(g, rc, S(4), st == 2 ? TilePress : TileHover);
@@ -357,10 +429,29 @@ namespace HdrSwitch
             {
                 var displays = Hdr.All();
                 on = displays.Any(d => d.On);
+                var hdrGames = app.running.Values.Where(r => app.games.Contains(r.Name)).Select(r => app.DisplayName(r.Name)).Distinct().ToList();
+                var res = app.res;
                 if (!displays.Any(d => d.Supported)) { title = "No HDR display found"; sub = "Turn HDR on in Settings › System › Display"; }
-                else if (app.running.Count > 0) { title = "HDR on"; sub = string.Join(", ", app.running.Values.Select(r => app.DisplayName(r.Name)).Distinct()); }
+                else if (hdrGames.Count > 0) { title = "HDR on"; sub = string.Join(", ", hdrGames); }
+                else if (res != null) { title = res.Mode.Text; sub = app.DisplayName(res.Game); }
                 else if (on) { title = "HDR is on"; sub = "Turned on elsewhere, so it is left alone"; }
                 else { title = "Waiting for a game"; sub = "HDR turns on the moment a game starts"; }
+                if (res != null && hdrGames.Count > 0) sub += " · " + res.Mode.Text;
+                else if (res != null && res.Back != null) sub += " · " + res.Back.Text + " after it closes";
+            }
+
+            /// <summary>"92.5 % · 24.6″": how much of the panel a mode covers when shown 1:1 in the middle.</summary>
+            static string SizeText(Resolution.Mode m, Resolution.Mode full, double inches)
+            {
+                if (full == null || full.Width == 0) return "";
+                double ratio = Math.Sqrt((double)m.Width * m.Width + (double)m.Height * m.Height) / Math.Sqrt((double)full.Width * full.Width + (double)full.Height * full.Height);
+                string s = (ratio * 100).ToString("0.0") + " %";
+                return inches > 0 ? s + " · " + (inches * ratio).ToString("0.0") + "″" : s;
+            }
+
+            static bool SameAspect(Resolution.Mode m, Resolution.Mode full)
+            {
+                return Math.Abs((long)m.Width * full.Height - (long)m.Height * full.Width) * 100 < (long)full.Width * full.Height;
             }
 
             void AddCard(Rectangle r)

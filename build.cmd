@@ -10,4 +10,4 @@ set CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe
 
 "%CSC%" /nologo /codepage:65001 /target:winexe /optimize+ /out:"%~dp0HdrSwitch.exe" /win32manifest:"%~dp0app.manifest" ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll ^
-  "%~dp0HdrSwitch.cs" "%~dp0Flyout.cs" "%~dp0Version.g.cs"
+  "%~dp0HdrSwitch.cs" "%~dp0Flyout.cs" "%~dp0Resolution.cs" "%~dp0Version.g.cs"

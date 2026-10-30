@@ -40,6 +40,25 @@ HDR Switch checks this repository once a day. When there is a new version, an **
 
 Your game list lives in `%AppData%\HdrSwitch\games.txt` (one exe per line; a `-` in front means "never").
 
+## Competitive resolution
+
+Some people play shooters on a smaller area than their monitor, say 25" of a 27" panel, with a low stretched resolution inside it. HDR Switch can do that per game: while the game runs, the desktop switches to a resolution of your choice, shown **1:1 in the middle of the screen with black borders**, so the monitor behaves like a smaller one. When the game closes, the screen goes back to its normal resolution. It is independent of HDR: a game can have HDR, a resolution, both or neither, and a game you set to "never HDR" can still have a resolution.
+
+In the flyout, click the **monitor symbol** next to a game. The list shows **Off**, then every resolution your display offers at its current refresh rate, the ones with the screen's own aspect ratio first, each with how much of the screen it covers (for example `92.5 % · 24.6″`). Pick one and it is saved, and applied right away if the game is running. The status card and the tray icon's tooltip show the active resolution next to the HDR state, for example `2368 × 1332 – Counter-Strike 2`.
+
+**One-time setup in NVIDIA Control Panel** (the resolution has to exist before HDR Switch can switch to it):
+
+1. **Display › Change resolution › Customize… › Create Custom Resolution**. Enter the size you want, at your monitor's refresh rate (not 60 Hz), test and save it. For 25" on a 27" 2560×1440 panel that is **2368 × 1332** (exactly 16:9, 92.5 % of the diagonal).
+2. **Display › Adjust desktop size and position**: scaling **No scaling**, perform scaling on **GPU**. "Override the scaling mode set by games and programs" is not needed: HDR Switch asks Windows for a centred picture itself. Leave it unticked unless the picture comes out stretched.
+
+Then, in the game, choose **borderless** or **fullscreen windowed** mode and whatever resolution you like, stretched or not. The game sizes its window from the desktop, which is now the smaller area, so a stretched 1280×960 fills exactly that area.
+
+The switch happens the moment you press Play in Steam, or when the game's process appears, so the game sees the smaller desktop from the start. If you set a resolution while the game is already running, restart the game if it doesn't fit. Three seconds after the last game with a resolution closes, the display goes back to the mode saved in Windows display settings, scaling included. The change is never saved: a reboot or sign-out always comes back at your normal resolution, and if HDR Switch is killed mid-game, its next start puts the display back as long as the game is gone. As with HDR, it only undoes what it did: if you or Windows change the resolution while the game runs (display settings, sleep and resume), it leaves it alone.
+
+**Known limitation:** in *exclusive* fullscreen a game sets its own display mode, which replaces the competitive one, so its stretched image fills the whole panel again. Use borderless or fullscreen windowed mode.
+
+The profiles live in `%AppData%\HdrSwitch\resolutions.txt`, one game per line (`cs2.exe  2368x1332`, optionally `@240` for a refresh rate); the pencil in the resolution view opens it, and edits apply as soon as you save. If a resolution doesn't exist at the needed refresh rate, nothing is switched and a notification says what to create.
+
 ## Uninstall
 
 Turn off **Start with Windows**, choose **Exit**, then delete the folder with `HdrSwitch.exe` and `%AppData%\HdrSwitch`.
