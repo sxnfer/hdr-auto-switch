@@ -284,9 +284,10 @@ namespace HdrSwitch
             if (!ProfiledRunning()) RevertResolution();   // the mode first: switching HDR off resets the mode anyway
             if (!HdrRunning() && owned.Count > 0)
             {
+                bool ours = InOurMode();
                 foreach (var d in owned) Hdr.Set(d, false);
                 owned.Clear();
-                KeepMode();   // a game with only a resolution may still be running
+                if (ours) KeepMode();   // a game with only a resolution may still be running
             }
             UpdateTray();
         }
@@ -326,15 +327,20 @@ namespace HdrSwitch
         {
             var d = Hdr.Primary();
             if (d == null || d.On) return false;   // no HDR display, or HDR already on (not ours to switch back)
+            bool ours = InOurMode();
             if (!Hdr.Set(d, true)) return false;
             if (!owned.Any(o => o.Key == d.Key)) owned.Add(d);
-            KeepMode();   // e.g. an HDR game started while another game has its competitive resolution
+            if (ours) KeepMode();   // e.g. an HDR game started while another game has its competitive resolution
             return true;
         }
 
+        /// <summary>The desktop is in the competitive mode this app set.</summary>
+        bool InOurMode() { return res != null && res.Mode.Same(Resolution.Current(res.Gdi)); }
+
         /// <summary>
-        /// Switching HDR on or off makes Windows reapply the display mode saved in settings, which drops the competitive
-        /// mode. Put it back – this is our own HDR switch undoing our own mode, not the user changing it.
+        /// Switching HDR on or off makes Windows reapply the display mode saved in settings, at once – before the call
+        /// returns – which drops the competitive mode. Called right after our own HDR switch, and only if the desktop was
+        /// in our mode just before it, so a mode the user picked by hand is never overridden.
         /// </summary>
         void KeepMode()
         {
@@ -342,16 +348,18 @@ namespace HdrSwitch
             Resolution.Apply(res.Gdi, res.Mode.Width, res.Mode.Height, res.Mode.Hz);
         }
 
-        /// <summary>A mode change can take HDR down with it: put back what this app owns.</summary>
-        void KeepHdr()
+        /// <summary>A mode change can take HDR down with it: put back what this app owns. True if HDR was switched.</summary>
+        bool KeepHdr()
         {
-            if (owned.Count == 0) return;
+            if (owned.Count == 0) return false;
+            bool switched = false;
             var all = Hdr.All();
             foreach (var o in owned)
             {
                 var d = all.FirstOrDefault(x => x.Key == o.Key);
-                if (d != null && !d.On) Hdr.Set(d, true);
+                if (d != null && !d.On) switched |= Hdr.Set(d, true);
             }
+            return switched;
         }
 
         // ---- competitive resolution ----
@@ -408,7 +416,7 @@ namespace HdrSwitch
             }
             res = new ActiveMode { Gdi = gdi, Mode = mode, Back = Resolution.Saved(gdi) ?? now, Game = name };
             SaveState();
-            KeepHdr();
+            if (KeepHdr()) KeepMode();   // putting HDR back would itself reset the mode
 
             // The panel should still get its native signal, with the smaller desktop centred in it.
             var after = Resolution.Read(gdi);
@@ -443,12 +451,15 @@ namespace HdrSwitch
         }
 
         /// <summary>
-        /// Windows says the display settings changed. If the desktop isn't in our mode any more (display settings, sleep and
-        /// resume…), it isn't ours to put back. Checked again 2 s later first, in case the change was a transient one.
+        /// Windows says the display settings changed. While a game with a resolution runs, ownership is kept: a game in
+        /// exclusive fullscreen sets its own mode, and Windows brings ours back on every Alt+Tab and when the game exits –
+        /// RevertResolution then decides, by looking at the mode at that moment. With no such game running (the grace
+        /// period, a Steam start that never came) a mode that isn't ours any more isn't ours to put back. Checked again
+        /// 2 s later first, in case the change was a transient one.
         /// </summary>
         void OnDisplayChanged(bool first)
         {
-            if (res != null && !res.Mode.Same(Resolution.Current(res.Gdi)))
+            if (res != null && !ProfiledRunning() && !res.Mode.Same(Resolution.Current(res.Gdi)))
             {
                 if (first) { modeCheck.Stop(); modeCheck.Start(); return; }
                 res = null;
@@ -727,6 +738,7 @@ namespace HdrSwitch
         /// <summary>"Dying Light: The Beast" (launcher name without "Steam: "), or "game.exe".</summary>
         string DisplayName(string name)
         {
+            if (name.Length == 0) return "a game";   // a mode taken over after a restart, before its game is found
             string l = LabelOf(name);
             if (l == name || l == "added by hand") return name + ".exe";
             int colon = l.IndexOf(": ");
@@ -817,6 +829,7 @@ namespace HdrSwitch
             steam.Dispose();
             SystemEvents.DisplaySettingsChanged -= onDisplayChanged;
             scanTimer.Stop();
+            modeCheck.Stop();
             sdrTimer.Stop();
             steamTimeout.Stop();
             foreach (var r in running.Values.Where(x => x.Wait != null))
