@@ -74,6 +74,24 @@ namespace HdrSwitch
             return ChangeDisplaySettingsExW(gdi, ref dm, IntPtr.Zero, CDS_FULLSCREEN, IntPtr.Zero) == DISP_CHANGE_SUCCESSFUL;
         }
 
+        /// <summary>Switches to this mode and saves it in display settings, as the Settings app does.</summary>
+        public static bool Save(string gdi, Mode m)
+        {
+            var dm = NewMode();
+            dm.dmPelsWidth = (uint)m.Width;
+            dm.dmPelsHeight = (uint)m.Height;
+            dm.dmDisplayFrequency = (uint)m.Hz;
+            dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+            return ChangeDisplaySettingsExW(gdi, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero) == DISP_CHANGE_SUCCESSFUL;
+        }
+
+        /// <summary>The desktop is in the mode saved in display settings.</summary>
+        public static bool AtSaved(string gdi)
+        {
+            var now = Current(gdi);
+            return now != null && now.Same(Saved(gdi));
+        }
+
         /// <summary>Back to the mode saved in display settings, scaling included.</summary>
         public static bool Restore(string gdi)
         {
@@ -153,7 +171,7 @@ namespace HdrSwitch
         static DevMode NewMode() { return new DevMode { dmSize = (ushort)Marshal.SizeOf(typeof(DevMode)) }; }
 
         const int ENUM_CURRENT_SETTINGS = -1, ENUM_REGISTRY_SETTINGS = -2;
-        const uint CDS_FULLSCREEN = 0x4;
+        const uint CDS_FULLSCREEN = 0x4, CDS_UPDATEREGISTRY = 0x1;
         const int DISP_CHANGE_SUCCESSFUL = 0;
         const uint DM_PELSWIDTH = 0x80000, DM_PELSHEIGHT = 0x100000, DM_DISPLAYFREQUENCY = 0x400000, DM_DISPLAYFIXEDOUTPUT = 0x20000000;
         const uint DMDFO_CENTER = 2;

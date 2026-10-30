@@ -70,7 +70,13 @@ namespace HdrSwitch
         static readonly string StateFile = Path.Combine(Dir, "resolution.state");   // the mode this app set – for crash recovery
 
         sealed class Running { public string Name; public RegisteredWaitHandle Wait; public WaitHandle Handle; }
-        sealed class ActiveMode { public string Gdi; public Resolution.Mode Mode, Back; public string Game; }   // Back: the saved mode it returns to
+        sealed class ActiveMode
+        {
+            public string Gdi;
+            public Resolution.Mode Mode, Back;   // Back: the saved mode it returns to
+            public string Game;
+            public int ScalingBack = -1;         // the NVIDIA scaling setting to put back, or -1 if this app didn't change it
+        }
 
         readonly SynchronizationContext ui = SynchronizationContext.Current;
         readonly NotifyIcon tray = new NotifyIcon();
@@ -133,7 +139,11 @@ namespace HdrSwitch
 
             RecoverResolution();   // a previous run was killed while a game had its resolution
             Rescan();              // games that were already running
-            if (res != null && !running.Values.Any(r => profiles.ContainsKey(r.Name))) RevertResolution();
+            if (!ProfiledRunning())
+            {
+                RevertResolution();
+                RestoreStrayScaling();
+            }
             scanTimer.Start();
             UpdateTray();
 
@@ -281,7 +291,11 @@ namespace HdrSwitch
         /// <summary>After the grace period: whatever no running game needs any more goes back – SDR, the saved mode.</summary>
         void Settle()
         {
-            if (!ProfiledRunning()) RevertResolution();   // the mode first: switching HDR off resets the mode anyway
+            if (!ProfiledRunning())   // the mode first: switching HDR off resets the mode anyway
+            {
+                RevertResolution();
+                RestoreStrayScaling();
+            }
             if (!HdrRunning() && owned.Count > 0)
             {
                 bool ours = InOurMode();
@@ -409,12 +423,14 @@ namespace HdrSwitch
                 return false;
             }
             var before = Resolution.Read(gdi);
+            int scalingBack = TakeScaling(gdi);   // before the mode: the game's own mode change must find No scaling already set
             if (!Resolution.Apply(gdi, mode.Width, mode.Height, mode.Hz))
             {
+                RestoreScaling(gdi, scalingBack);
                 if (resFailed.Add(name)) Notify("Windows didn't switch to " + mode.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
                 return false;
             }
-            res = new ActiveMode { Gdi = gdi, Mode = mode, Back = Resolution.Saved(gdi) ?? now, Game = name };
+            res = new ActiveMode { Gdi = gdi, Mode = mode, Back = Resolution.Saved(gdi) ?? now, Game = name, ScalingBack = scalingBack };
             SaveState();
             if (KeepHdr()) KeepMode();   // putting HDR back would itself reset the mode
 
@@ -432,7 +448,7 @@ namespace HdrSwitch
                 {
                     resWarned = true;
                     Notify(mode.Text + " is being stretched. In NVIDIA Control Panel › Adjust desktop size and position, "
-                        + "choose No scaling and untick Override the scaling mode.");
+                        + "untick Override the scaling mode set by games and programs.");
                 }
             }
             return true;
@@ -445,9 +461,61 @@ namespace HdrSwitch
             var r = res;
             res = null;
             DeleteState();
-            if (!r.Mode.Same(Resolution.Current(r.Gdi))) return;   // changed meanwhile (settings, sleep, …): not ours any more
-            Resolution.Restore(r.Gdi);
-            KeepHdr();
+            if (r.Mode.Same(Resolution.Current(r.Gdi)))   // otherwise changed meanwhile (settings, sleep, …): not ours any more
+            {
+                var saved = Resolution.Saved(r.Gdi);
+                if (r.Mode.Same(saved) && r.Back != null && !r.Back.Same(saved))
+                    Resolution.Save(r.Gdi, r.Back);   // something saved our temporary mode (a Control Panel change mid-game): undo that for good
+                else
+                    Resolution.Restore(r.Gdi);
+                KeepHdr();
+            }
+            RestoreScaling(r.Gdi, r.ScalingBack);   // the scaling setting is separate from the mode: put it back either way
+        }
+
+        int strayScaling = -1;   // a scaling setting still to put back: left by a killed previous run, or deferred (see RestoreScaling)
+
+        /// <summary>
+        /// Switches the NVIDIA driver's scaling default to No scaling, so a game that sets its own mode in exclusive fullscreen
+        /// stays centred too. Returns the setting to put back afterwards, or -1 if nothing was changed: no NVIDIA driver, it
+        /// already centres (set that way by the user – or left switched by this app, whose original is then taken over), or
+        /// the desktop isn't at its saved mode (see AtSaved below).
+        /// </summary>
+        int TakeScaling(string gdi)
+        {
+            int s = Nvidia.Scaling(gdi);
+            if (s < 0) return -1;
+            if (Nvidia.Centres(s))
+            {
+                int back = strayScaling;
+                strayScaling = -1;
+                return back;
+            }
+            // The driver saves the whole display configuration with the setting, the current resolution included – so it is
+            // only ever changed while the desktop is at the mode saved in display settings, never at a temporary one.
+            if (!Resolution.AtSaved(gdi)) return -1;
+            return Nvidia.SetScaling(gdi, Nvidia.NoScaling) ? s : -1;
+        }
+
+        /// <summary>
+        /// Puts the scaling setting back – only if it is still the No scaling this app set. If the desktop isn't at its saved
+        /// mode right now (another game's own mode, say), it is kept for later: the next display change or grace period.
+        /// </summary>
+        void RestoreScaling(string gdi, int back)
+        {
+            if (back < 0 || Nvidia.Scaling(gdi) != Nvidia.NoScaling) return;   // nothing to do, or the user changed it
+            if (Resolution.AtSaved(gdi) && Nvidia.SetScaling(gdi, back)) return;
+            strayScaling = back;
+            if (res == null) WriteState(gdi + "|0|0|0|" + back);   // so a crash before the retry still puts it back
+        }
+
+        void RestoreStrayScaling()
+        {
+            if (strayScaling < 0) return;
+            int back = strayScaling;
+            strayScaling = -1;
+            RestoreScaling(TargetGdi(), back);
+            if (strayScaling < 0 && res == null) DeleteState();
         }
 
         /// <summary>
@@ -462,9 +530,12 @@ namespace HdrSwitch
             if (res != null && !ProfiledRunning() && !res.Mode.Same(Resolution.Current(res.Gdi)))
             {
                 if (first) { modeCheck.Stop(); modeCheck.Start(); return; }
+                var r = res;
                 res = null;
                 DeleteState();
+                RestoreScaling(r.Gdi, r.ScalingBack);   // the mode isn't ours any more, but the scaling setting still is
             }
+            if (!ProfiledRunning()) RestoreStrayScaling();   // a deferred restore: maybe the desktop is back at its saved mode now
             UpdateTray();
         }
 
@@ -485,8 +556,12 @@ namespace HdrSwitch
 
         void SaveState()
         {
-            try { File.WriteAllText(StateFile, res.Gdi + "|" + res.Mode.Width + "|" + res.Mode.Height + "|" + res.Mode.Hz); }
-            catch (IOException) { }
+            WriteState(res.Gdi + "|" + res.Mode.Width + "|" + res.Mode.Height + "|" + res.Mode.Hz + "|" + res.ScalingBack);
+        }
+
+        static void WriteState(string text)
+        {
+            try { File.WriteAllText(StateFile, text); } catch (IOException) { }
         }
 
         void DeleteState()
@@ -497,8 +572,8 @@ namespace HdrSwitch
         /// <summary>
         /// A previous run was killed while a game had its resolution: if the desktop is still in that mode, take it over –
         /// the first Rescan adopts the running game, or the constructor puts the display back if the game is gone.
-        /// (In practice Windows drops a CDS_FULLSCREEN mode the moment the process that set it dies, so this mostly
-        /// just removes the stale file; it is here for the case where it doesn't.)
+        /// (In practice Windows drops a CDS_FULLSCREEN mode the moment the process that set it dies.) The NVIDIA scaling
+        /// setting is saved by the driver, so it does survive: it is put back too, or handed to the running game's session.
         /// </summary>
         void RecoverResolution()
         {
@@ -510,11 +585,17 @@ namespace HdrSwitch
             }
             catch (IOException) { return; }
             string[] f = text.Trim().Split('|');
-            int w, h, hz;
-            if (f.Length != 4 || !int.TryParse(f[1], out w) || !int.TryParse(f[2], out h) || !int.TryParse(f[3], out hz)) { DeleteState(); return; }
+            int w, h, hz, back = -1;
+            if (f.Length < 4 || !int.TryParse(f[1], out w) || !int.TryParse(f[2], out h) || !int.TryParse(f[3], out hz)
+                || (f.Length > 4 && !int.TryParse(f[4], out back))) { DeleteState(); return; }
             var mode = new Resolution.Mode { Width = w, Height = h, Hz = hz };
-            if (!mode.Same(Resolution.Current(f[0]))) { DeleteState(); return; }   // a reboot or the user already put it back
-            res = new ActiveMode { Gdi = f[0], Mode = mode, Back = Resolution.Saved(f[0]), Game = "" };
+            if (!mode.Same(Resolution.Current(f[0])))   // the mode is gone (killed, reboot, put back by hand)
+            {
+                strayScaling = back;
+                DeleteState();
+                return;
+            }
+            res = new ActiveMode { Gdi = f[0], Mode = mode, Back = Resolution.Saved(f[0]), Game = "", ScalingBack = back };
         }
 
         void LoadProfiles()
