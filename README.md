@@ -20,7 +20,7 @@ Click the icon (left or right button) and a small panel opens by the taskbar, in
 | | |
 |---|---|
 | **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display found`. An **Update to version …** button appears here when there is one. |
-| **Tiles** | **Start with Windows** (lit when on), **Look for games** to scan again, **Add a program** for anything it missed – it lists the programs that are running. |
+| **Tiles** | **Start with Windows** (lit when on), **SDR while recording** (see below), **Look for games** to scan again, **Add a program** for anything it missed – it lists the programs that are running. |
 | **Games** | Every game it found, each with a switch. Switching one off keeps it listed, so a slip is one click to undo. |
 | **Bottom bar** | The pencil opens `games.txt`, **Exit** quits. |
 
@@ -39,6 +39,12 @@ HDR Switch checks this repository once a day. When there is a new version, an **
 - Idle cost: about 0.2% of one CPU core and ~20 MB of memory.
 
 Your game list lives in `%AppData%\HdrSwitch\games.txt` (one exe per line; a `-` in front means "never").
+
+## Recording with OBS
+
+An HDR game recorded by OBS with its usual SDR settings comes out washed out: OBS has to squeeze the HDR picture into SDR. Turn on **SDR while recording** in the flyout and, while OBS Studio or Streamlabs runs, nothing switches HDR on, so your recordings keep their normal colours. If a game already has HDR on when OBS starts, HDR goes back to SDR straight away; when OBS closes and the game is still running, HDR comes back on. HDR you turned on yourself is left alone. It is off until you turn it on.
+
+Some games only offer their HDR option if HDR was on when they started (Dying Light: The Beast, for example), so while OBS is open they run in SDR until you restart them. Want HDR footage instead? Leave the tile off and set OBS to record in HDR: **Settings › Advanced**, Color Format **P010** and Color Space **Rec. 2100 (PQ)**, with a 10-bit HEVC or AV1 encoder. Those files only look right on an HDR screen or YouTube HDR.
 
 ## Competitive resolution
 

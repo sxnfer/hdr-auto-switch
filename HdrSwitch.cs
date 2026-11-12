@@ -64,6 +64,7 @@ namespace HdrSwitch
         const int SdrDelayMs = 3000;   // wait after the last game closes (covers launchers that restart the game)
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         const string RunValue = "HDR Switch";
+        const string SettingsKey = @"Software\HDR Switch";
         static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "HdrSwitch");
         static readonly string ListFile = Path.Combine(Dir, "games.txt");
         static readonly string ProfilesFile = Path.Combine(Dir, "resolutions.txt");
@@ -107,6 +108,15 @@ namespace HdrSwitch
         Flyout flyout;
         Updater.Release update;   // a newer release, once found
         bool updating;
+
+        // Recording apps (process name → name shown). An HDR game captured into an SDR recording comes out washed out,
+        // so with "SDR while recording" on, nothing switches HDR on while one of these runs.
+        static readonly Dictionary<string, string> Recorders = new Dictionary<string, string>
+        {
+            { "obs64", "OBS Studio" }, { "obs32", "OBS Studio" }, { "streamlabs obs", "Streamlabs" }
+        };
+        bool sdrWhileRecording = ReadSetting("SdrWhileRecording");
+        string recorder;   // the recording app that is running, while "SDR while recording" is on
 
         public TrayApp(bool updated, bool open)   // --open: show the flyout right away (development, screenshots)
         {
@@ -314,10 +324,13 @@ namespace HdrSwitch
         void Rescan()
         {
             bool unwaitable = running.Values.Any(r => r.Wait == null);
-            if (games.Count == 0 && profiles.Count == 0 && !unwaitable) return;
+            if (games.Count == 0 && profiles.Count == 0 && !unwaitable && !sdrWhileRecording) return;
 
             var alive = new HashSet<int>();
-            foreach (var p in Proc.Snapshot())
+            var snapshot = Proc.Snapshot();
+            // The recorder first, so a game found in the same scan already sees it.
+            SetRecorder(sdrWhileRecording ? snapshot.Select(p => p.Value).FirstOrDefault(Recorders.ContainsKey) : null);
+            foreach (var p in snapshot)
             {
                 alive.Add(p.Key);
                 if (Followed(p.Value) && !running.ContainsKey(p.Key)) Track(p.Key, p.Value);
@@ -339,6 +352,7 @@ namespace HdrSwitch
         /// <summary>True if HDR was switched on just now.</summary>
         bool SwitchOn()
         {
+            if (recorder != null) return false;   // SDR while recording
             var d = Hdr.Primary();
             if (d == null || d.On) return false;   // no HDR display, or HDR already on (not ours to switch back)
             bool ours = InOurMode();
@@ -346,6 +360,50 @@ namespace HdrSwitch
             if (!owned.Any(o => o.Key == d.Key)) owned.Add(d);
             if (ours) KeepMode();   // e.g. an HDR game started while another game has its competitive resolution
             return true;
+        }
+
+        /// <summary>
+        /// A recording app started (name) or closed (null). While it runs, HDR this app turned on goes back to SDR, so a
+        /// recording keeps its colours; once it closes, a game that is still running gets its HDR back. HDR turned on
+        /// elsewhere is left alone, as always.
+        /// </summary>
+        void SetRecorder(string name)
+        {
+            if (name == recorder) return;
+            recorder = name;
+            if (name != null)
+            {
+                if (owned.Count > 0)
+                {
+                    bool ours = InOurMode();
+                    foreach (var d in owned) Hdr.Set(d, false);
+                    owned.Clear();
+                    if (ours) KeepMode();
+                    Notify("HDR is off while " + Recorders[name] + " runs, so recordings keep their colours.");
+                }
+            }
+            else if (HdrRunning()) SwitchOn();
+            UpdateTray();
+        }
+
+        void SetSdrWhileRecording(bool on)
+        {
+            sdrWhileRecording = on;
+            WriteSetting("SdrWhileRecording", on);
+            if (on) Rescan();
+            else SetRecorder(null);
+        }
+
+        static bool ReadSetting(string name)
+        {
+            using (var k = Registry.CurrentUser.OpenSubKey(SettingsKey))
+                return k != null && k.GetValue(name) is int && (int)k.GetValue(name) != 0;
+        }
+
+        static void WriteSetting(string name, bool on)
+        {
+            using (var k = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                k.SetValue(name, on ? 1 : 0, RegistryValueKind.DWord);
         }
 
         /// <summary>The desktop is in the competitive mode this app set.</summary>
@@ -809,11 +867,12 @@ namespace HdrSwitch
             var displays = Hdr.All();
             var hdrGames = running.Values.Where(r => games.Contains(r.Name)).Select(r => DisplayName(r.Name)).Distinct().ToList();
             string hdr = !displays.Any(d => d.Supported) ? "No HDR display found"
+                : recorder != null && !displays.Any(d => d.On) ? "SDR – " + Recorders[recorder] + " is running"
                 : hdrGames.Count > 0 ? "HDR on – " + string.Join(", ", hdrGames)
                 : displays.Any(d => d.On) ? "HDR is on" : "Waiting for a game";
             if (res == null) return hdr;
             string mode = res.Mode.Text + " – " + DisplayName(res.Game);
-            return hdrGames.Count > 0 || displays.Any(d => d.On) ? hdr + "\n" + mode : mode;   // "Waiting for a game" adds nothing here
+            return hdrGames.Count > 0 || recorder != null || displays.Any(d => d.On) ? hdr + "\n" + mode : mode;   // "Waiting for a game" adds nothing here
         }
 
         /// <summary>"Dying Light: The Beast" (launcher name without "Steam: "), or "game.exe".</summary>

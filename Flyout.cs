@@ -246,13 +246,15 @@ namespace HdrSwitch
                 int tileH = S(52), gap = S(8);
                 var c2 = new Rectangle(M, y, W - 2 * M, CP + tileH + S(6) + S(32) + S(12));
                 AddCard(c2);
-                int tw = (c2.Width - 2 * CP - 2 * gap) / 3;
+                int tw = (c2.Width - 2 * CP - 3 * gap) / 4;
                 bool startup = IsStartup();
                 AddTile(new Rectangle(c2.X + CP, c2.Y + CP, tw, tileH), "", "Start with Windows", startup, true, false,
                     () => { SetStartup(!IsStartup()); Rebuild(); });
-                AddTile(new Rectangle(c2.X + CP + tw + gap, c2.Y + CP, tw, tileH), "", app.scanning ? "Looking…" : "Look for games", false, !app.scanning, false,
+                AddTile(new Rectangle(c2.X + CP + tw + gap, c2.Y + CP, tw, tileH), "", "SDR while recording", app.sdrWhileRecording, true, false,
+                    () => { app.SetSdrWhileRecording(!app.sdrWhileRecording); Rebuild(); });
+                AddTile(new Rectangle(c2.X + CP + 2 * (tw + gap), c2.Y + CP, tw, tileH), "", app.scanning ? "Looking…" : "Look for games", false, !app.scanning, false,
                     () => { app.ScanInBackground(true); Rebuild(); });
-                AddTile(new Rectangle(c2.X + CP + 2 * (tw + gap), c2.Y + CP, tw, tileH), "", "Add a program", false, true, true,
+                AddTile(new Rectangle(c2.X + CP + 3 * (tw + gap), c2.Y + CP, tw, tileH), "", "Add a program", false, true, true,
                     () => { picking = true; scroll = 0; Rebuild(); });
                 y = c2.Bottom + M;
 
@@ -432,6 +434,11 @@ namespace HdrSwitch
                 var hdrGames = app.running.Values.Where(r => app.games.Contains(r.Name)).Select(r => app.DisplayName(r.Name)).Distinct().ToList();
                 var res = app.res;
                 if (!displays.Any(d => d.Supported)) { title = "No HDR display found"; sub = "Turn HDR on in Settings › System › Display"; }
+                else if (app.recorder != null && !on)
+                {
+                    title = "SDR while recording";
+                    sub = TrayApp.Recorders[app.recorder] + " is running" + (hdrGames.Count > 0 ? " · " + string.Join(", ", hdrGames) : "");
+                }
                 else if (hdrGames.Count > 0) { title = "HDR on"; sub = string.Join(", ", hdrGames); }
                 else if (res != null) { title = res.Mode.Text; sub = app.DisplayName(res.Game); }
                 else if (on) { title = "HDR is on"; sub = "Turned on elsewhere, so it is left alone"; }
