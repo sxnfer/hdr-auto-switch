@@ -7,7 +7,9 @@
 //
 // A game can also have a competitive resolution (resolutions.txt): while it runs the desktop switches to a
 // smaller mode shown 1:1 in the middle of the panel, and goes back to the saved mode after it closes. Same
-// rules: temporary, and only a mode this app set is ever put back.
+// rules: temporary, and only a mode this app set is ever put back. A game in borderless mode can also run at a
+// lower resolution of its own, stretched over that smaller area by the GPU's scan-out scaler (the "stretch" part
+// of a line in resolutions.txt; see Resolution.cs).
 //
 // Build with build.cmd (uses the C# compiler that ships with Windows / .NET Framework 4.8).
 
@@ -75,8 +77,11 @@ namespace HdrSwitch
         {
             public string Gdi;
             public Resolution.Mode Mode, Back;   // Back: the saved mode it returns to
+            public Resolution.Mode Area;         // the competitive area Mode is stretched over – or null: Mode is the area itself, shown 1:1
             public string Game;
             public int ScalingBack = -1;         // the NVIDIA scaling setting to put back, or -1 if this app didn't change it
+            /// <summary>"2368 × 1332", or "1776 × 1332 stretched to 2368 × 1332".</summary>
+            public string Text { get { return Area == null ? Mode.Text : Mode.Text + " stretched to " + Area.Text; } }
         }
 
         readonly SynchronizationContext ui = SynchronizationContext.Current;
@@ -100,6 +105,7 @@ namespace HdrSwitch
         HashSet<string> excluded = new HashSet<string>();                 // "-name.exe" lines: never switch, never re-added by a scan
         Dictionary<string, string> labels = new Dictionary<string, string>();   // name → note shown in the list ("Steam: Cyberpunk 2077")
         Dictionary<string, Resolution.Mode> profiles = new Dictionary<string, Resolution.Mode>();   // name → competitive resolution (Hz 0: current rate)
+        Dictionary<string, Resolution.Mode> stretches = new Dictionary<string, Resolution.Mode>();  // name → the game's own resolution, stretched over its competitive one
         Dictionary<string, string> profileLabels = new Dictionary<string, string>();               // notes from resolutions.txt, used if games.txt has none
         bool scanning;
         readonly Dictionary<int, Running> running = new Dictionary<int, Running>();
@@ -407,7 +413,17 @@ namespace HdrSwitch
         }
 
         /// <summary>The desktop is in the competitive mode this app set.</summary>
-        bool InOurMode() { return res != null && res.Mode.Same(Resolution.Current(res.Gdi)); }
+        bool InOurMode()
+        {
+            return res != null && res.Mode.Same(Resolution.Current(res.Gdi))
+                && (res.Area == null || Resolution.Stretched(res.Gdi, res.Area.Width, res.Area.Height));
+        }
+
+        /// <summary>
+        /// A stretched mode was replaced by one set elsewhere – in practice by a game in exclusive fullscreen. Shown in the
+        /// flyout and the tooltip, because the notification about it is easily missed (or switched off in Windows).
+        /// </summary>
+        bool StretchLost() { return res != null && res.Area != null && !InOurMode() && !Resolution.AtSaved(res.Gdi); }
 
         /// <summary>
         /// Switching HDR on or off makes Windows reapply the display mode saved in settings, at once – before the call
@@ -416,8 +432,15 @@ namespace HdrSwitch
         /// </summary>
         void KeepMode()
         {
-            if (res == null || res.Mode.Same(Resolution.Current(res.Gdi))) return;
-            Resolution.Apply(res.Gdi, res.Mode.Width, res.Mode.Height, res.Mode.Hz);
+            if (res == null || InOurMode()) return;
+            SetMode(res);
+        }
+
+        /// <summary>Switches the desktop to a competitive mode: shown 1:1 in the middle, or stretched over its area.</summary>
+        static bool SetMode(ActiveMode m)
+        {
+            return m.Area == null ? Resolution.Apply(m.Gdi, m.Mode.Width, m.Mode.Height, m.Mode.Hz)
+                : Resolution.ApplyStretched(m.Gdi, m.Mode.Width, m.Mode.Height, m.Mode.Hz, m.Area.Width, m.Area.Height);
         }
 
         /// <summary>A mode change can take HDR down with it: put back what this app owns. True if HDR was switched.</summary>
@@ -451,7 +474,7 @@ namespace HdrSwitch
 
         string ResHint(string name)
         {
-            return "The screen switched to " + res.Mode.Text + " after " + DisplayName(name) + " had already started. "
+            return "The screen switched to " + res.Text + " after " + DisplayName(name) + " had already started. "
                 + "If the game doesn't fit the screen, restart it.";
         }
 
@@ -471,8 +494,15 @@ namespace HdrSwitch
             string gdi = TargetGdi();
             var now = Resolution.Current(gdi);
             if (now == null) return false;
-            var mode = new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = p.Hz > 0 ? p.Hz : now.Hz };
-            if (mode.Same(now)) return false;   // already in that mode (set by hand): not ours to switch back
+            var area = new Resolution.Mode { Width = p.Width, Height = p.Height, Hz = p.Hz > 0 ? p.Hz : now.Hz };
+            // A game in borderless mode can have a lower resolution of its own, stretched over the competitive one.
+            Resolution.Mode own = StretchOf(name);
+            if (own == null && stretches.ContainsKey(name) && resFailed.Add(name + "/fit"))
+                Notify(stretches[name].Text + " doesn't fit inside " + area.Text + " for " + DisplayName(name) + ", so it isn't stretched: "
+                    + "the GPU can only enlarge a picture. Pick a resolution no wider or taller than " + area.Text + ".");
+            bool stretch = own != null;
+            var mode = stretch ? new Resolution.Mode { Width = own.Width, Height = own.Height, Hz = area.Hz } : area;
+            if (mode.Same(now) && (!stretch || Resolution.Stretched(gdi, area.Width, area.Height))) return false;   // already in that mode (set by hand): not ours to switch back
             if (!Resolution.Available(gdi, mode.Width, mode.Height, mode.Hz))
             {
                 if (resFailed.Add(name))
@@ -481,16 +511,20 @@ namespace HdrSwitch
                 return false;
             }
             var before = Resolution.Read(gdi);
-            int scalingBack = TakeScaling(gdi);   // before the mode: the game's own mode change must find No scaling already set
-            if (!Resolution.Apply(gdi, mode.Width, mode.Height, mode.Hz))
+            // Before the mode: the game's own mode change must find No scaling already set. A stretched mode needs no
+            // driver setting – it only lasts while the game sets no mode of its own.
+            int scalingBack = stretch ? -1 : TakeScaling(gdi);
+            var active = new ActiveMode { Gdi = gdi, Mode = mode, Area = stretch ? area : null, Back = Resolution.Saved(gdi) ?? now, Game = name, ScalingBack = scalingBack };
+            if (!SetMode(active))
             {
                 RestoreScaling(gdi, scalingBack);
-                if (resFailed.Add(name)) Notify("Windows didn't switch to " + mode.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
+                if (resFailed.Add(name)) Notify("Windows didn't switch to " + active.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
                 return false;
             }
-            res = new ActiveMode { Gdi = gdi, Mode = mode, Back = Resolution.Saved(gdi) ?? now, Game = name, ScalingBack = scalingBack };
+            res = active;
             SaveState();
             if (KeepHdr()) KeepMode();   // putting HDR back would itself reset the mode
+            if (stretch) return true;    // what follows is about the driver centring a 1:1 mode
 
             // The panel should still get its native signal, with the smaller desktop centred in it.
             var after = Resolution.Read(gdi);
@@ -593,6 +627,16 @@ namespace HdrSwitch
                 DeleteState();
                 RestoreScaling(r.Gdi, r.ScalingBack);   // the mode isn't ours any more, but the scaling setting still is
             }
+            else if (ProfiledRunning() && StretchLost())
+            {
+                // A stretched mode only lasts while nothing else sets a mode. A game in exclusive fullscreen does, and puts
+                // its own back after every change from outside, so forcing ours would only start a fight over the display.
+                // Left alone, like any mode set elsewhere – but said once, because the fix is in the game's settings.
+                if (first) { modeCheck.Stop(); modeCheck.Start(); return; }
+                if (resFailed.Add(res.Game + "/own"))
+                    Notify(DisplayName(res.Game) + " set a display mode of its own, so " + res.Mode.Text + " is no longer stretched over "
+                        + res.Area.Text + ". Stretching needs the game in borderless (fullscreen windowed) mode: change that in its settings, then start it again.");
+            }
             if (!ProfiledRunning()) RestoreStrayScaling();   // a deferred restore: maybe the desktop is back at its saved mode now
             UpdateTray();
         }
@@ -603,7 +647,7 @@ namespace HdrSwitch
             if (res != null)
             {
                 Resolution.Mode p;
-                bool keep = profiles.TryGetValue(res.Game, out p) && p.Width == res.Mode.Width && p.Height == res.Mode.Height && (p.Hz == 0 || p.Hz == res.Mode.Hz);
+                bool keep = profiles.TryGetValue(res.Game, out p) && Matches(res, p, StretchOf(res.Game));
                 if (!keep) RevertResolution();
             }
             foreach (var r in running.Values.ToList())
@@ -614,7 +658,29 @@ namespace HdrSwitch
 
         void SaveState()
         {
-            WriteState(res.Gdi + "|" + res.Mode.Width + "|" + res.Mode.Height + "|" + res.Mode.Hz + "|" + res.ScalingBack);
+            WriteState(res.Gdi + "|" + res.Mode.Width + "|" + res.Mode.Height + "|" + res.Mode.Hz + "|" + res.ScalingBack
+                + (res.Area == null ? "" : "|" + res.Area.Width + "|" + res.Area.Height));
+        }
+
+        /// <summary>The active mode is what this profile – and its stretched resolution, if it has one – asks for.</summary>
+        static bool Matches(ActiveMode a, Resolution.Mode p, Resolution.Mode own)
+        {
+            var area = a.Area ?? a.Mode;
+            if (p.Width != area.Width || p.Height != area.Height || (p.Hz != 0 && p.Hz != a.Mode.Hz)) return false;
+            return a.Area == null ? own == null : own != null && own.Width == a.Mode.Width && own.Height == a.Mode.Height;
+        }
+
+        /// <summary>The game's own resolution to stretch over its competitive one – or null: it has none, or it doesn't fit.</summary>
+        Resolution.Mode StretchOf(string name)
+        {
+            Resolution.Mode own, p;
+            return stretches.TryGetValue(name, out own) && profiles.TryGetValue(name, out p) && Fits(own, p) ? own : null;
+        }
+
+        /// <summary>The GPU's scaler only enlarges, so a stretched resolution has to lie inside the area (and not be the area).</summary>
+        static bool Fits(Resolution.Mode own, Resolution.Mode area)
+        {
+            return own.Width <= area.Width && own.Height <= area.Height && (own.Width < area.Width || own.Height < area.Height);
         }
 
         static void WriteState(string text)
@@ -630,7 +696,8 @@ namespace HdrSwitch
         /// <summary>
         /// A previous run was killed while a game had its resolution: if the desktop is still in that mode, take it over –
         /// the first Rescan adopts the running game, or the constructor puts the display back if the game is gone.
-        /// (In practice Windows drops a CDS_FULLSCREEN mode the moment the process that set it dies.) The NVIDIA scaling
+        /// (Windows drops a CDS_FULLSCREEN mode the moment the process that set it dies – but not a stretched one, which
+        /// stays until the next mode change: this is what puts that back.) The NVIDIA scaling
         /// setting is saved by the driver, so it does survive: it is put back too, or handed to the running game's session.
         /// </summary>
         void RecoverResolution()
@@ -643,9 +710,10 @@ namespace HdrSwitch
             }
             catch (IOException) { return; }
             string[] f = text.Trim().Split('|');
-            int w, h, hz, back = -1;
+            int w, h, hz, back = -1, areaW = 0, areaH = 0;
             if (f.Length < 4 || !int.TryParse(f[1], out w) || !int.TryParse(f[2], out h) || !int.TryParse(f[3], out hz)
-                || (f.Length > 4 && !int.TryParse(f[4], out back))) { DeleteState(); return; }
+                || (f.Length > 4 && !int.TryParse(f[4], out back))
+                || (f.Length > 6 && (!int.TryParse(f[5], out areaW) || !int.TryParse(f[6], out areaH)))) { DeleteState(); return; }
             var mode = new Resolution.Mode { Width = w, Height = h, Hz = hz };
             if (!mode.Same(Resolution.Current(f[0])))   // the mode is gone (killed, reboot, put back by hand)
             {
@@ -653,7 +721,8 @@ namespace HdrSwitch
                 DeleteState();
                 return;
             }
-            res = new ActiveMode { Gdi = f[0], Mode = mode, Back = Resolution.Saved(f[0]), Game = "", ScalingBack = back };
+            res = new ActiveMode { Gdi = f[0], Mode = mode, Back = Resolution.Saved(f[0]), Game = "", ScalingBack = back,
+                Area = areaW > 0 && areaH > 0 ? new Resolution.Mode { Width = areaW, Height = areaH, Hz = hz } : null };
         }
 
         void LoadProfiles()
@@ -664,6 +733,7 @@ namespace HdrSwitch
             catch (IOException) { return; }   // file busy (being saved) – the watcher fires again
 
             var newProfiles = new Dictionary<string, Resolution.Mode>();
+            var newStretches = new Dictionary<string, Resolution.Mode>();
             var newLabels = new Dictionary<string, string>();
             foreach (string raw in lines)
             {
@@ -685,19 +755,37 @@ namespace HdrSwitch
                 };
                 if (p.Width < 320 || p.Height < 200) continue;
                 newProfiles[name] = p;
+                if (m.Groups[5].Success)
+                {
+                    var own = new Resolution.Mode { Width = int.Parse(m.Groups[5].Value), Height = int.Parse(m.Groups[6].Value) };
+                    if (own.Width >= 320 && own.Height >= 200) newStretches[name] = own;
+                }
                 if (label.Length > 0) newLabels[name] = label;
             }
             foreach (var kv in newProfiles)   // a changed line gets its "doesn't exist" notice again
             {
-                Resolution.Mode old;
-                if (!profiles.TryGetValue(kv.Key, out old) || !old.Same(kv.Value)) resFailed.Remove(kv.Key);
+                Resolution.Mode old, oldOwn, newOwn;
+                stretches.TryGetValue(kv.Key, out oldOwn);
+                newStretches.TryGetValue(kv.Key, out newOwn);
+                bool same = profiles.TryGetValue(kv.Key, out old) && old.Same(kv.Value) && (oldOwn == null ? newOwn == null : oldOwn.Same(newOwn));
+                if (!same) ForgetNotices(kv.Key);
             }
             profiles = newProfiles;
+            stretches = newStretches;
             profileLabels = newLabels;
         }
 
-        // "cs2.exe  2368x1332", "cs2.exe 2368 × 1332 @ 240" (the note after # is already gone)
-        static readonly Regex ProfileLine = new Regex(@"^(.+?)\s+(\d{3,5})\s*[x×]\s*(\d{3,5})(?:\s*@\s*(\d{2,4})(?:\s*hz)?)?$", RegexOptions.IgnoreCase);
+        // "cs2.exe  2368x1332", "cs2.exe 2368 × 1332 @ 240", "cs2.exe 2368x1332 stretch 1776x1332" (the note after # is already gone)
+        static readonly Regex ProfileLine = new Regex(@"^(.+?)\s+(\d{3,5})\s*[x×]\s*(\d{3,5})(?:\s*@\s*(\d{2,4})(?:\s*hz)?)?"
+            + @"(?:\s+stretch(?:ed)?\s*:?\s*(\d{3,5})\s*[x×]\s*(\d{3,5}))?$", RegexOptions.IgnoreCase);
+
+        /// <summary>A game's profile changed: it gets its one-time notices again.</summary>
+        void ForgetNotices(string name)
+        {
+            resFailed.Remove(name);
+            resFailed.Remove(name + "/fit");
+            resFailed.Remove(name + "/own");
+        }
 
         void SaveProfiles()
         {
@@ -707,12 +795,17 @@ namespace HdrSwitch
                 "# resolution, shown 1:1 in the middle with black borders, and goes back when the game closes.",
                 "# One game per line: exe, resolution, optional @refresh rate (otherwise the current one). Text after # is a note.",
                 "# The resolution must be in Windows' list: create it in NVIDIA Control Panel > Change resolution > Customize.",
+                "# For a game in borderless (fullscreen windowed) mode, add  stretch 1776x1332  after the resolution: the game",
+                "# then runs at that lower resolution, stretched over the competitive one. It has to fit inside it.",
                 "# Easier: click the tray icon, then the monitor symbol next to a game. Changes apply as soon as you save.",
                 ""
             };
             lines.AddRange(profiles.Keys.OrderBy(LabelOf, StringComparer.OrdinalIgnoreCase).Select(g =>
             {
-                string line = (g + ".exe").PadRight(35) + " " + (profiles[g].Width + "x" + profiles[g].Height + (profiles[g].Hz > 0 ? "@" + profiles[g].Hz : "")).PadRight(16);
+                Resolution.Mode own;
+                stretches.TryGetValue(g, out own);
+                string line = (g + ".exe").PadRight(35) + " " + (profiles[g].Width + "x" + profiles[g].Height + (profiles[g].Hz > 0 ? "@" + profiles[g].Hz : "")).PadRight(16)
+                    + (own == null ? "" : " " + ("stretch " + own.Width + "x" + own.Height).PadRight(18));
                 string l = LabelOf(g);
                 return l == g ? line.TrimEnd() : line + " # " + l;
             }));
@@ -722,12 +815,28 @@ namespace HdrSwitch
         /// <summary>From the flyout: this game's resolution (null: off). Saved, and applied right away if the game runs.</summary>
         void SetProfile(string name, Resolution.Mode mode)
         {
-            if (mode == null) profiles.Remove(name);
-            else profiles[name] = mode;
-            resFailed.Remove(name);
+            Resolution.Mode own;
+            if (mode == null) { profiles.Remove(name); stretches.Remove(name); }
+            else
+            {
+                profiles[name] = mode;
+                if (stretches.TryGetValue(name, out own) && !Fits(own, mode)) stretches.Remove(name);   // no longer inside the new area
+            }
+            ForgetNotices(name);
             SaveProfiles();
             ForgetRemoved();
             Rescan();
+            ReapplyProfiles();
+        }
+
+        /// <summary>This game's own resolution, stretched over its competitive one (null: none). Saved and applied right away.</summary>
+        void SetStretch(string name, Resolution.Mode own)
+        {
+            if (!profiles.ContainsKey(name)) return;
+            if (own == null) stretches.Remove(name);
+            else stretches[name] = new Resolution.Mode { Width = own.Width, Height = own.Height };
+            ForgetNotices(name);
+            SaveProfiles();
             ReapplyProfiles();
         }
 
@@ -871,7 +980,7 @@ namespace HdrSwitch
                 : hdrGames.Count > 0 ? "HDR on – " + string.Join(", ", hdrGames)
                 : displays.Any(d => d.On) ? "HDR is on" : "Waiting for a game";
             if (res == null) return hdr;
-            string mode = res.Mode.Text + " – " + DisplayName(res.Game);
+            string mode = (StretchLost() ? res.Mode.Text + " not stretched" : res.Text) + " – " + DisplayName(res.Game);
             return hdrGames.Count > 0 || recorder != null || displays.Any(d => d.On) ? hdr + "\n" + mode : mode;   // "Waiting for a game" adds nothing here
         }
 

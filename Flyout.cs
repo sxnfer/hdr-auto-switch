@@ -59,6 +59,7 @@ namespace HdrSwitch
             int hover = -1, pressed = -1;
             bool picking;     // the list shows running programs to add, instead of the games
             string choosing;  // the list shows the resolutions for this game, instead of the games
+            bool stretching;  // choosing: the list shows the game's own resolutions, to stretch over its competitive one
             int hiddenAt = -100000;
             readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 10 };
             Stopwatch clock;
@@ -114,6 +115,7 @@ namespace HdrSwitch
             {
                 picking = false;
                 choosing = null;
+                stretching = false;
                 scroll = 0;
                 Rebuild();
                 Point offset;
@@ -276,8 +278,19 @@ namespace HdrSwitch
                     var pic = Resolution.Read(gdi);   // the panel's own size is the target of the display path
                     full = pic != null ? new Resolution.Mode { Width = pic.TargetW, Height = pic.TargetH, Hz = hz } : cur;
                     inches = Resolution.Inches(gdi);
-                    modes.Add(null);
-                    if (full != null)
+                    if (chosen == null) stretching = false;   // nothing to stretch over
+                    if (stretching)
+                    {
+                        // The game's own resolution: the sizes that lie inside the competitive one, which the GPU stretches over it.
+                        modes.Add(null);
+                        modes.AddRange(Resolution.Modes(gdi, hz).Where(m => Fits(m, chosen)).OrderByDescending(m => (long)m.Width * m.Height));
+                    }
+                    else
+                    {
+                        if (chosen != null) modes.Add(StretchRow);
+                        modes.Add(null);
+                    }
+                    if (!stretching && full != null)
                         modes.AddRange(Resolution.Modes(gdi, hz)
                             .Where(m => m.Width < full.Width || m.Height < full.Height)
                             .OrderBy(m => SameAspect(m, full) ? 0 : 1).ThenByDescending(m => (long)m.Width * m.Height));
@@ -291,13 +304,13 @@ namespace HdrSwitch
                 if (picking || choosing != null)
                 {
                     var back = new Rectangle(c3.X + S(10), c3.Y + S(6), S(32), S(32));
-                    items.Add(new Item { Rect = back, Click = () => { picking = false; choosing = null; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
+                    items.Add(new Item { Rect = back, Click = () => { if (stretching) stretching = false; else { picking = false; choosing = null; } scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
                     {
                         if (st > 0) FillRound(g, rc, S(4), st == 2 ? RowPress : RowHover);
                         Draw(g, "", glyph, Text1, rc, TfCenter);
                     } });
                     string head = picking ? "Add a running program" : app.DisplayName(choosing);
-                    string headRight = picking ? "" : "at " + hz + " Hz";
+                    string headRight = picking ? "" : stretching ? "inside " + chosen.Text : "at " + hz + " Hz";
                     items.Add(new Item { Rect = c3, Paint = (g, rc, st) =>
                     {
                         Draw(g, head, bodyStrong, Text1, new Rectangle(rc.X + S(50), rc.Y, rc.Width - S(50) - CP - S(70), headH), TfLeft);
@@ -328,6 +341,40 @@ namespace HdrSwitch
                     {
                         var m = modes[i];
                         string game = choosing;
+                        if (ReferenceEquals(m, StretchRow))
+                        {
+                            // Opens the list of resolutions the game itself can run at, stretched over this one.
+                            Resolution.Mode ownNow = app.StretchOf(game);
+                            string ownText = ownNow == null ? "Not stretched" : ownNow.Text + ", stretched";
+                            items.Add(new Item { Rect = rr, Scrolls = true, Click = () => { stretching = true; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
+                            {
+                                RowBg(g, rc, st);
+                                Draw(g, "Game resolution", body, Text1, new Rectangle(rc.X + CP, rc.Y, S(130), rowH), TfLeft);
+                                Draw(g, ownText, caption, ownNow != null ? accent : Text3, new Rectangle(rc.X + CP + S(130), rc.Y, rc.Width - 2 * CP - S(130) - S(28), rowH), TfLeft | TextFormatFlags.Right);
+                                Draw(g, "\uE76C", glyphSmall, Text3, new Rectangle(rc.Right - CP - S(20), rc.Y, S(20), rowH), TfCenter);
+                            } });
+                            continue;
+                        }
+                        if (stretching)
+                        {
+                            Resolution.Mode ownNow = app.StretchOf(game);
+                            bool isOwn = m == null ? ownNow == null : ownNow != null && m.Width == ownNow.Width && m.Height == ownNow.Height;
+                            string ownLabel = m == null ? "Not stretched" : m.Text;
+                            string ownDetail = m == null ? chosen.Text + " · 1:1" : AspectText(m) + " · stretched";
+                            items.Add(new Item { Rect = rr, Scrolls = true, Click = () =>
+                            {
+                                stretching = false; choosing = null; scroll = 0;
+                                app.SetStretch(game, m);
+                                Rebuild();
+                            }, Paint = (g, rc, st) =>
+                            {
+                                RowBg(g, rc, st);
+                                Draw(g, ownLabel, body, Text1, new Rectangle(rc.X + CP, rc.Y, S(120), rowH), TfLeft);
+                                Draw(g, ownDetail, caption, Text3, new Rectangle(rc.X + CP + S(120), rc.Y, rc.Width - 2 * CP - S(120) - S(28), rowH), TfLeft | TextFormatFlags.Right);
+                                if (isOwn) Draw(g, "\uE73E", glyphSmall, accent, new Rectangle(rc.Right - CP - S(20), rc.Y, S(20), rowH), TfCenter);
+                            } });
+                            continue;
+                        }
                         int keepHz = chosen != null ? chosen.Hz : 0;
                         bool isChosen = m == null ? chosen == null : chosen != null && m.Width == chosen.Width && m.Height == chosen.Height;
                         string label = m == null ? "Off" : m.Text;
@@ -359,7 +406,8 @@ namespace HdrSwitch
                         bool isOn = app.games.Contains(name);
                         Resolution.Mode prof;
                         app.profiles.TryGetValue(name, out prof);
-                        string cap = prof == null ? null : ProfileText(prof);
+                        Resolution.Mode own = prof == null ? null : app.StretchOf(name);
+                        string cap = prof == null ? null : own == null ? ProfileText(prof) : own.Text + " stretched";
                         int capW = cap == null ? 0 : TextRenderer.MeasureText(cap, caption, new Size(int.MaxValue, rowH), TfCaption).Width + S(10);
                         int monX = rr.Right - CP - S(40) - S(8) - S(32);   // the monitor symbol, left of the switch
                         var mon = new Rectangle(monX, rr.Y + (rowH - S(32)) / 2, S(32), S(32));
@@ -372,7 +420,7 @@ namespace HdrSwitch
                             Switch(g, new Rectangle(rc.Right - CP - S(40), rc.Y + (rowH - S(20)) / 2, S(40), S(20)), isOn, st);
                         } });
                         // The monitor symbol opens the game's resolution view; lit when it has one.
-                        items.Add(new Item { Rect = mon, Scrolls = true, Tip = "Competitive resolution", Click = () => { choosing = name; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
+                        items.Add(new Item { Rect = mon, Scrolls = true, Tip = "Competitive resolution", Click = () => { choosing = name; stretching = false; scroll = 0; Rebuild(); }, Paint = (g, rc, st) =>
                         {
                             if (st > 0) FillRound(g, rc, S(4), st == 2 ? RowPress : RowHover);
                             Draw(g, "", glyph, prof != null ? accent : st > 0 ? Text1 : Text3, rc, TfCenter);
@@ -381,7 +429,9 @@ namespace HdrSwitch
                 }
                 if (choosing != null)
                 {
-                    string note = "Missing one? Create it as a custom resolution in NVIDIA Control Panel (Change resolution › Customize), at " + hz + " Hz.";
+                    string note = stretching
+                        ? "For a game in borderless (fullscreen windowed) mode: it runs at this resolution and the GPU stretches it over " + chosen.Text + "."
+                        : "Missing one? Create it as a custom resolution in NVIDIA Control Panel (Change resolution › Customize), at " + hz + " Hz.";
                     items.Add(new Item { Rect = new Rectangle(c3.X + CP, listClip.Bottom + S(2), c3.Width - 2 * CP, footH - S(6)), Paint = (g, rc, st) =>
                         Draw(g, note, caption, Text3, rc, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.VerticalCenter) });
                 }
@@ -443,7 +493,8 @@ namespace HdrSwitch
                 else if (res != null) { title = res.Mode.Text; sub = app.DisplayName(res.Game); }
                 else if (on) { title = "HDR is on"; sub = "Turned on elsewhere, so it is left alone"; }
                 else { title = "Waiting for a game"; sub = "HDR turns on the moment a game starts"; }
-                if (res != null && hdrGames.Count > 0) sub += " · " + res.Mode.Text;
+                if (res != null && hdrGames.Count > 0) sub += " · " + res.Text;
+                else if (res != null && res.Area != null) sub += app.StretchLost() ? " · not stretched: use borderless" : " · stretched to " + res.Area.Text;
                 else if (res != null && res.Back != null) sub += " · " + res.Back.Text + " after it closes";
             }
 
@@ -454,6 +505,18 @@ namespace HdrSwitch
                 double ratio = Math.Sqrt((double)m.Width * m.Width + (double)m.Height * m.Height) / Math.Sqrt((double)full.Width * full.Width + (double)full.Height * full.Height);
                 string s = (ratio * 100).ToString("0.0") + " %";
                 return inches > 0 ? s + " · " + (inches * ratio).ToString("0.0") + "″" : s;
+            }
+
+            static readonly Resolution.Mode StretchRow = new Resolution.Mode();   // stands for the "Game resolution" row among the modes
+
+            /// <summary>"4:3", "16:10", "16:9" … or "1.78:1" for a shape without a short name.</summary>
+            static string AspectText(Resolution.Mode m)
+            {
+                int a = m.Width, b = m.Height;
+                while (b != 0) { int t = a % b; a = b; b = t; }
+                int w = m.Width / a, h = m.Height / a;
+                if (w == 8 && h == 5) return "16:10";
+                return w <= 21 && h <= 10 ? w + ":" + h : ((double)m.Width / m.Height).ToString("0.00") + ":1";
             }
 
             static bool SameAspect(Resolution.Mode m, Resolution.Mode full)

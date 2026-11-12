@@ -6,6 +6,19 @@
 // to the registry, so a reboot, sign-out or a NULL-mode call always comes back at the mode saved in display
 // settings. DM_DISPLAYFIXEDOUTPUT = DMDFO_CENTER asks the driver to keep sending the panel its native signal and
 // to show the smaller desktop centred, with black borders (what NVIDIA calls "No scaling").
+//
+// A game can also get a resolution of its own inside that area ("stretched"): the desktop goes to the game's
+// resolution, and the display path's desktop image region – where on the signal Windows puts the desktop – is set
+// to the centred area (SetDisplayConfig, virtual-mode aware). The NVIDIA driver carries that out with its scan-out
+// scaler, the one "Full screen" scaling uses, aimed at a smaller rectangle: nothing is added to the display path.
+// Three things to know about it:
+//  - It only holds while nothing else sets a mode. Any ChangeDisplaySettings call – a game in exclusive fullscreen –
+//    makes Windows rebuild the path with the driver's own scaling, even for the very same mode. So it is for games in
+//    borderless / fullscreen windowed mode, which render at the desktop size and never ask for a mode.
+//  - The scaler only enlarges. A mode that would have to shrink into the area is composited by Windows instead
+//    (a frame of latency), so that is never asked for.
+//  - Windows doesn't drop it when the process dies, as it does a CDS_FULLSCREEN mode. It is never saved either, so a
+//    reboot or sign-out still comes back at the saved mode; before that, the app's next start puts it back.
 
 using System;
 using System.Collections.Generic;
@@ -98,6 +111,109 @@ namespace HdrSwitch
             return ChangeDisplaySettingsExW(gdi, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero) == DISP_CHANGE_SUCCESSFUL;
         }
 
+        /// <summary>
+        /// Shows the desktop at w×h, stretched over a centred areaW×areaH rectangle of the panel with black around it,
+        /// until Restore. The panel keeps its native signal and the GPU's scan-out scaler does the stretching (see the
+        /// top of this file), so w×h has to fit inside the area.
+        /// </summary>
+        public static bool ApplyStretched(string gdi, int w, int h, int hz, int areaW, int areaH)
+        {
+            if (w > areaW || h > areaH) return false;
+            var now = Current(gdi);
+            if (now == null) return false;
+            // In one step where it can be: the size and the region together. Another refresh rate, or a desktop layout
+            // Windows won't take as supplied (more displays), needs the mode set first.
+            if (now.Hz == hz && Aim(gdi, w, h, areaW, areaH)) return true;
+            if (!Apply(gdi, w, h, hz)) return false;
+            if (Aim(gdi, w, h, areaW, areaH)) return true;
+            Restore(gdi);
+            return false;
+        }
+
+        /// <summary>The desktop of this display is being stretched over that centred area of the panel right now.</summary>
+        public static bool Stretched(string gdi, int areaW, int areaH)
+        {
+            using (var c = Query(gdi))
+            {
+                if (c == null) return false;
+                int tw = Marshal.ReadInt32(c.Target, 40), th = Marshal.ReadInt32(c.Target, 44), x = (tw - areaW) / 2, y = (th - areaH) / 2;
+                return Marshal.ReadInt32(c.Desktop, 16) == tw && Marshal.ReadInt32(c.Desktop, 20) == th
+                    && Marshal.ReadInt32(c.Desktop, 24) == x && Marshal.ReadInt32(c.Desktop, 28) == y
+                    && Marshal.ReadInt32(c.Desktop, 32) == x + areaW && Marshal.ReadInt32(c.Desktop, 36) == y + areaH;
+            }
+        }
+
+        /// <summary>Sets the desktop size and aims it at the centred area: the path's desktop image region. Not saved.</summary>
+        static bool Aim(string gdi, int w, int h, int areaW, int areaH)
+        {
+            using (var c = Query(gdi))
+            {
+                if (c == null) return false;
+                int tw = Marshal.ReadInt32(c.Target, 40), th = Marshal.ReadInt32(c.Target, 44);
+                if (w > areaW || h > areaH || areaW > tw || areaH > th) return false;   // only ever enlarging – see the top of this file
+                int x = (tw - areaW) / 2, y = (th - areaH) / 2;
+                Marshal.WriteInt32(c.Source, 16, w);
+                Marshal.WriteInt32(c.Source, 20, h);
+                // DISPLAYCONFIG_DESKTOP_IMAGE_INFO at 16: PathSourceSize (the signal), DesktopImageRegion (the area on
+                // it), DesktopImageClip (the whole desktop).
+                int[] info = { tw, th, x, y, x + areaW, y + areaH, 0, 0, w, h };
+                Marshal.Copy(info, 0, (IntPtr)((long)c.Desktop + 16), info.Length);
+                c.Paths[c.Path].Target.Scaling = 1;   // identity: the path's surface is the signal itself, the region does the rest
+                return SetDisplayConfig(c.PathCount, c.Paths, c.ModeCount, c.Modes, SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_VIRTUAL_MODE_AWARE) == 0;
+            }
+        }
+
+        /// <summary>The active display configuration with virtual modes, and this display's path and mode entries in it.</summary>
+        sealed class Config : IDisposable
+        {
+            public PathInfo[] Paths;
+            public uint PathCount, ModeCount;
+            public IntPtr Modes;
+            public int Path;
+            public IntPtr Source, Desktop, Target;   // this path's DISPLAYCONFIG_MODE_INFO entries
+            public void Dispose() { if (Modes != IntPtr.Zero) Marshal.FreeHGlobal(Modes); Modes = IntPtr.Zero; }
+        }
+
+        /// <summary>Null if the display isn't found or its path has no virtual modes (a driver older than WDDM 2.0).</summary>
+        static Config Query(string gdi)
+        {
+            const uint flags = QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_MODE_AWARE;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                uint np, nm;
+                if (GetDisplayConfigBufferSizes(flags, out np, out nm) != 0) return null;
+                var c = new Config { Paths = new PathInfo[np], Modes = Marshal.AllocHGlobal((int)Math.Max(1, nm) * ModeSize) };
+                bool found = false;
+                try
+                {
+                    int r = QueryDisplayConfig(flags, ref np, c.Paths, ref nm, c.Modes, IntPtr.Zero);
+                    if (r == ERROR_INSUFFICIENT_BUFFER) continue;
+                    if (r != 0) return null;
+                    c.PathCount = np;
+                    c.ModeCount = nm;
+                    for (int i = 0; i < np; i++)
+                    {
+                        var src = new SourceName { H = new DeviceInfoHeader { Type = 1, Size = Marshal.SizeOf(typeof(SourceName)), Adapter = c.Paths[i].Source.Adapter, Id = c.Paths[i].Source.Id } };
+                        if (DisplayConfigGetDeviceInfo(ref src) != 0 || src.Gdi != gdi) continue;
+                        if ((c.Paths[i].Flags & DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE) == 0) return null;
+                        // With virtual modes each index field holds two 16-bit halves: source = clone group | source mode,
+                        // target = desktop image | target mode.
+                        uint s = c.Paths[i].Source.ModeIdx >> 16, d = c.Paths[i].Target.ModeIdx & 0xFFFF, t = c.Paths[i].Target.ModeIdx >> 16;
+                        if (s >= nm || d >= nm || t >= nm) return null;
+                        c.Path = i;
+                        c.Source = (IntPtr)((long)c.Modes + s * ModeSize);
+                        c.Desktop = (IntPtr)((long)c.Modes + d * ModeSize);
+                        c.Target = (IntPtr)((long)c.Modes + t * ModeSize);
+                        found = true;
+                        return c;
+                    }
+                    return null;
+                }
+                finally { if (!found) c.Dispose(); }
+            }
+            return null;
+        }
+
         /// <summary>Source and target size of this display's active path, or null if it isn't found.</summary>
         public static Picture Read(string gdi)
         {
@@ -176,7 +292,9 @@ namespace HdrSwitch
         const uint DM_PELSWIDTH = 0x80000, DM_PELSHEIGHT = 0x100000, DM_DISPLAYFREQUENCY = 0x400000, DM_DISPLAYFIXEDOUTPUT = 0x20000000;
         const uint DMDFO_CENTER = 2;
         const uint EDD_GET_DEVICE_INTERFACE_NAME = 1;
-        const uint QDC_ONLY_ACTIVE_PATHS = 2;
+        const uint QDC_ONLY_ACTIVE_PATHS = 2, QDC_VIRTUAL_MODE_AWARE = 0x10;
+        const uint SDC_USE_SUPPLIED_DISPLAY_CONFIG = 0x20, SDC_APPLY = 0x80, SDC_VIRTUAL_MODE_AWARE = 0x8000;
+        const uint DISPLAYCONFIG_PATH_SUPPORT_VIRTUAL_MODE = 0x8;
         const int ERROR_INSUFFICIENT_BUFFER = 122;
         const int ModeSize = 64;   // sizeof(DISPLAYCONFIG_MODE_INFO)
 
@@ -224,6 +342,7 @@ namespace HdrSwitch
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool EnumDisplayDevicesW(string device, uint index, ref DisplayDevice dd, uint flags);
         [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint numPaths, out uint numModes);
         [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint numPaths, [Out] PathInfo[] paths, ref uint numModes, IntPtr modes, IntPtr topology);
+        [DllImport("user32.dll")] static extern int SetDisplayConfig(uint numPaths, [In] PathInfo[] paths, uint numModes, IntPtr modes, uint flags);
         [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref SourceName info);
     }
 }
