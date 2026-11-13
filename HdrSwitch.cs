@@ -92,8 +92,8 @@ namespace HdrSwitch
 
         readonly SynchronizationContext ui = SynchronizationContext.Current;
         readonly NotifyIcon tray = new NotifyIcon();
-        readonly Icon iconOn = MakeIcon(Color.FromArgb(255, 170, 0), Color.Black);
-        readonly Icon iconOff = MakeIcon(Color.FromArgb(120, 120, 120), Color.White);
+        readonly Icon iconOn = MakeIcon(true);
+        readonly Icon iconOff = MakeIcon(false);
         readonly System.Windows.Forms.Timer sdrTimer = new System.Windows.Forms.Timer { Interval = SdrDelayMs };
         readonly System.Windows.Forms.Timer scanTimer = new System.Windows.Forms.Timer { Interval = 1000 };     // catches games as their process starts
         readonly System.Windows.Forms.Timer steamTimeout = new System.Windows.Forms.Timer { Interval = 60000 }; // Play pressed, but no game appeared
@@ -1131,27 +1131,25 @@ namespace HdrSwitch
             }
         }
 
-        static Icon MakeIcon(Color fill, Color text)
+        /// <summary>
+        /// The tray icon: the app's mark, amber for HDR and grey for SDR. The H is three whole-pixel bars rather than a
+        /// letter from a font, so it is as crisp at 16 px as at 20, 24 and 32.
+        /// </summary>
+        static Icon MakeIcon(bool on)
         {
             int s = SystemInformation.SmallIconSize.Width;
             using (var bmp = new Bitmap(s, s))
             using (var g = Graphics.FromImage(bmp))
-            using (var path = new GraphicsPath())
-            using (var brush = new SolidBrush(fill))
-            using (var pen = new SolidBrush(text))
-            using (var font = new Font("Segoe UI", s * 0.62f, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var bars = new SolidBrush(on ? Color.Black : Color.White))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                int r = Math.Max(2, s / 4);
-                path.AddArc(0, 0, r * 2, r * 2, 180, 90);
-                path.AddArc(s - 1 - r * 2, 0, r * 2, r * 2, 270, 90);
-                path.AddArc(s - 1 - r * 2, s - 1 - r * 2, r * 2, r * 2, 0, 90);
-                path.AddArc(0, s - 1 - r * 2, r * 2, r * 2, 90, 90);
-                path.CloseFigure();
-                g.FillPath(brush, path);
-                var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                g.DrawString("H", font, pen, new RectangleF(0, 0, s, s + 1), fmt);
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                Theme.Fill(g, new RectangleF(0, 0, s, s), s * 0.3f, on ? Theme.Amber : Theme.Grey);
+                g.SmoothingMode = SmoothingMode.None;
+                int t = Math.Max(2, (int)(s / 8.0 + 0.5)), m = (int)(s * 0.25 + 0.5), top = (int)(s * 0.22 + 0.5);
+                g.FillRectangle(bars, m, top, t, s - 2 * top);
+                g.FillRectangle(bars, s - m - t, top, t, s - 2 * top);
+                g.FillRectangle(bars, m, (s - t) / 2, s - 2 * m, t);
                 return Icon.FromHandle(bmp.GetHicon());   // two icons for the app's lifetime – handles are never freed
             }
         }
