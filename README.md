@@ -19,7 +19,7 @@ Click the icon (left or right button) and a small panel slides in by the taskbar
 
 | | |
 |---|---|
-| **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display found`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to version …** button appears here when there is one. |
+| **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to …** button appears here when there is one. |
 | **Tiles** | **Start with Windows**, **SDR while recording** (see below) and **Island** (see below). A tile is white while it is on. |
 | **Games** | Every game it found, each with a switch: amber means HDR turns on for it. Switching one off keeps it listed, so a slip is one click to undo. The two round buttons in the header **look for games** again and **add a program** it missed, from a list of the programs that are running. |
 | **Bottom bar** | The pencil opens `games.txt`, **Exit** quits. |
@@ -45,7 +45,7 @@ The island's shapes and motion are inspired by Apple's Dynamic Island and by the
 
 ## Updates
 
-HDR Switch checks this repository once a day. When there is a new version, an **Update to version …** button appears at the top of the flyout. One click downloads it, checks it against the release's SHA256 checksum, and restarts the app. The update check is the only time the app goes online.
+HDR Switch checks this repository once a day. When there is a new version, an **Update to …** button appears at the top of the flyout. One click downloads it, checks it against the release's SHA256 checksum, and restarts the app. The update check is the only time the app goes online.
 
 ## How it works
 
@@ -67,7 +67,7 @@ Some games only offer their HDR option if HDR was on when they started (Dying Li
 
 Some people play shooters on a smaller area than their monitor, say 25" of a 27" panel, with a low stretched resolution inside it. HDR Switch can do that per game: while the game runs, the desktop switches to a resolution of your choice, shown **1:1 in the middle of the screen with black borders**, so the monitor behaves like a smaller one. When the game closes, the screen goes back to its normal resolution. It is independent of HDR: a game can have HDR, a resolution, both or neither, and a game you set to "never HDR" can still have a resolution.
 
-In the flyout, click the **monitor symbol** next to a game. The list shows **Off**, then every resolution your display offers at its current refresh rate, the ones with the screen's own aspect ratio first, each with how much of the screen it covers (for example `92.5 % · 24.6″`). Pick one and it is saved, and applied right away if the game is running. The status card and the tray icon's tooltip show the active resolution next to the HDR state, for example `2368 × 1332 – Counter-Strike 2`.
+In the flyout, click the **monitor symbol** next to a game. The list shows **Off** (the whole screen), then every resolution your display offers at its current refresh rate, the ones with the screen's own aspect ratio first, each with how much of the screen it covers (for example `92.5 % · 24.6″`). Pick one and it is saved, and applied right away if the game is running. The status card and the tray icon's tooltip show the active resolution next to the HDR state, for example `2368 × 1332 – Counter-Strike 2`.
 
 **One-time setup in NVIDIA Control Panel** (the resolution has to exist before HDR Switch can switch to it):
 
