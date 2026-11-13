@@ -609,6 +609,8 @@ namespace HdrSwitch
                     else   // the island's own symbol: a small pill
                         using (var pen = new Pen(fg, Math.Max(1f, 1.5f * k)))
                         using (var p = Theme.Round(new RectangleF(rc.X + S(12), rc.Y + S(15), S(20), S(11)), S(11) / 2f)) g.DrawPath(pen, p);
+                    // The state in words as well: three lit tiles side by side don't say by themselves that lit means on.
+                    Draw(g, on ? "On" : "Off", fonts.Caption, Theme.Mix(Theme.Text2, Color.FromArgb(60, 60, 67), lk.On), new Rectangle(rc.Right - S(12) - S(40), rc.Y + S(11), S(40), S(20)), TfCaption);
                     Draw(g, label, fonts.Label, fg, new Rectangle(rc.X + S(12), rc.Bottom - S(10) - S(32), rc.Width - S(20), S(32)),
                         TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.Bottom);
                 } });
