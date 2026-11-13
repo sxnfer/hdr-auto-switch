@@ -373,7 +373,7 @@ namespace HdrSwitch
                 else
                 {
                     string onCount = app.games.Count + " on";
-                    int gamesW = TextRenderer.MeasureText("Games", fonts.Strong, Size.Empty, TfLeft).Width;
+                    int gamesW = TextRenderer.MeasureText("Games", fonts.Strong, Size.Empty, TfLeft).Width + S(6);   // measured a little short for semibold
                     items.Add(new Item { Rect = c3, Paint = (g, rc, lk) =>
                     {
                         Draw(g, "Games", fonts.Strong, Theme.Text1, new Rectangle(rc.X + CP, rc.Y, gamesW, headH), TfLeft);
