@@ -42,6 +42,12 @@ namespace HdrSwitch
         {
             // --updated: started by the old version during an update – wait for it to exit instead of giving up.
             bool updated = args.Contains("--updated");
+            if (args.Contains("--island-demo"))   // a preview of the island alone: before the mutex, so it runs beside an installed copy
+            {
+                Application.EnableVisualStyles();
+                Island.Demo();
+                return;
+            }
             using (var mutex = new Mutex(false, @"Local\HdrSwitch.SingleInstance"))
             {
                 bool mine;
@@ -1689,5 +1695,30 @@ namespace HdrSwitch
         [DllImport("kernel32.dll")] public static extern bool SetProcessWorkingSetSize(IntPtr proc, IntPtr min, IntPtr max);
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        // Motion and the island's layered window.
+        [StructLayout(LayoutKind.Sequential)] public struct BlendFunction { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BitmapInfo   // BITMAPINFOHEADER: 32-bit needs no colour table after it
+        {
+            public int Size, Width, Height;
+            public short Planes, BitCount;
+            public int Compression, SizeImage, XPelsPerMeter, YPelsPerMeter, ClrUsed, ClrImportant;
+        }
+        [DllImport("dwmapi.dll")] public static extern int DwmFlush();
+        [DllImport("winmm.dll")] public static extern uint timeBeginPeriod(uint ms);
+        [DllImport("winmm.dll")] public static extern uint timeEndPeriod(uint ms);
+        [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint param, out bool value, uint winIni);
+        [DllImport("user32.dll")] public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref Point dst, ref Size size, IntPtr hdcSrc, ref Point src, int key, ref BlendFunction blend, int flags);
+        [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
+        [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+        [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(Point p, uint flags);
+        [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+        [DllImport("shell32.dll")] public static extern int SHQueryUserNotificationState(out int state);
+        [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+        [DllImport("gdi32.dll")] public static extern IntPtr CreateDIBSection(IntPtr hdc, ref BitmapInfo info, uint usage, out IntPtr bits, IntPtr section, uint offset);
+        [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+        [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
+        [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr hdc);
     }
 }
