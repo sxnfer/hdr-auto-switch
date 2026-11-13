@@ -291,7 +291,7 @@ namespace HdrSwitch
                 if (hasUpdate)
                 {
                     bool busy = app.updating;
-                    string label = busy ? "Updating…" : "Update to version " + app.update.VersionText;
+                    string label = busy ? "Updating…" : "Update to " + app.update.VersionText;
                     items.Add(new Item
                     {
                         Rect = new Rectangle(c1.X + CP, c1.Y + updateY, c1.Width - 2 * CP, S(36)), Key = "update",
@@ -310,9 +310,9 @@ namespace HdrSwitch
                 int tileH = S(76), tg = S(8), tw3 = (W - 2 * M - 2 * tg) / 3;
                 AddTile(new Rectangle(M, y, tw3, tileH), "startup", "", "Start with Windows", IsStartup(), null,
                     () => { SetStartup(!IsStartup()); Rebuild(); });
-                AddTile(new Rectangle(M + tw3 + tg, y, tw3, tileH), "recording", "", "SDR while recording", app.sdrWhileRecording, "No HDR while OBS or Streamlabs runs",
+                AddTile(new Rectangle(M + tw3 + tg, y, tw3, tileH), "recording", "", "SDR while recording", app.sdrWhileRecording, null,
                     () => { app.SetSdrWhileRecording(!app.sdrWhileRecording); Rebuild(); });
-                AddTile(new Rectangle(W - M - tw3, y, tw3, tileH), "island", null, "Island", app.islandOn, "A small pill at the top of the screen when something happens",
+                AddTile(new Rectangle(W - M - tw3, y, tw3, tileH), "island", null, "Island", app.islandOn, "Pill at the top of the screen",
                     () => { app.SetIsland(!app.islandOn); Rebuild(); });
                 y += tileH + G;
 
@@ -362,7 +362,7 @@ namespace HdrSwitch
                     var back = new Rectangle(c3.X + S(8), c3.Y + S(6), S(32), S(32));
                     items.Add(new Item { Rect = back, Key = "back", Click = () => { if (stretching) stretching = false; else { picking = false; choosing = null; } ScrollHome(); Rebuild(); },
                         Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Raised, "", fonts.GlyphSmall, Theme.Text1) });
-                    string head = picking ? "Add a running program" : app.DisplayName(choosing);
+                    string head = picking ? "Add a program" : app.DisplayName(choosing);
                     string headRight = picking ? "" : stretching ? "inside " + chosen.Text : "at " + hz + " Hz";
                     items.Add(new Item { Rect = c3, Paint = (g, rc, lk) =>
                     {
@@ -395,7 +395,7 @@ namespace HdrSwitch
                 scroll = (int)Math.Round(scrollTo.Value);
                 if (count == 0)
                 {
-                    string msg = picking ? "Nothing else with a window is running" : app.scanning ? "Looking for games…" : "No games found";
+                    string msg = picking ? "No programs" : app.scanning ? "Looking…" : "No games";
                     items.Add(new Item { Rect = listClip, Paint = (g, rc, lk) => Draw(g, msg, fonts.Body, Theme.Text3, rc, TfCenter) });
                 }
                 for (int i = 0; i < count; i++)
@@ -425,7 +425,7 @@ namespace HdrSwitch
                             Resolution.Mode ownNow = app.StretchOf(game);
                             bool isOwn = m == null ? ownNow == null : ownNow != null && m.Width == ownNow.Width && m.Height == ownNow.Height;
                             string ownLabel = m == null ? "Not stretched" : m.Text;
-                            string ownDetail = m == null ? chosen.Text + " · 1:1" : AspectText(m) + " · stretched";
+                            string ownDetail = m == null ? "" : AspectText(m);
                             items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Click = () =>
                             {
                                 stretching = false; choosing = null; ScrollHome();
@@ -443,7 +443,7 @@ namespace HdrSwitch
                         int keepHz = chosen != null ? chosen.Hz : 0;
                         bool isChosen = m == null ? chosen == null : chosen != null && m.Width == chosen.Width && m.Height == chosen.Height;
                         string label = m == null ? "Off" : m.Text;
-                        string detail = m == null ? (full == null ? "" : full.Text + " · the whole screen") : SizeText(m, full, inches);
+                        string detail = m == null ? (full == null ? "" : "Full screen") : SizeText(m, full, inches);
                         items.Add(new Item { Rect = rr, Scrolls = true, Key = key, Click = () =>
                         {
                             choosing = null; ScrollHome();
@@ -485,15 +485,15 @@ namespace HdrSwitch
                             Theme.Switch(g, new RectangleF(rc.Right - CP - S(44), rc.Y + (rowH - S(26)) / 2f, S(44), S(26)), lk.On, lk.Hover);
                         } });
                         // The monitor symbol opens the game's resolution view; white when it has one.
-                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Competitive resolution", Click = () => { choosing = name; stretching = false; ScrollHome(); Rebuild(); },
+                        items.Add(new Item { Rect = mon, Scrolls = true, Key = "mon:" + name, Tip = "Resolution", Click = () => { choosing = name; stretching = false; ScrollHome(); Rebuild(); },
                             Paint = (g, rc, lk) => Button(g, rc, lk, Theme.Card, "", fonts.Glyph, prof != null ? Theme.Text1 : Theme.Mix(Theme.Text3, Theme.Text1, lk.Hover)) });
                     }
                 }
                 if (choosing != null)
                 {
                     string note = stretching
-                        ? "For a game in borderless (fullscreen windowed) mode: it runs at this resolution and the GPU stretches it over " + chosen.Text + "."
-                        : "Missing one? Create it as a custom resolution in NVIDIA Control Panel (Change resolution › Customize), at " + hz + " Hz.";
+                        ? "For borderless games. Stretched over " + chosen.Text + "."
+                        : "Missing one? Create it in NVIDIA Control Panel, at " + hz + " Hz.";
                     items.Add(new Item { Rect = new Rectangle(c3.X + CP, listClip.Bottom + S(4), c3.Width - 2 * CP, footH - S(12)), Paint = (g, rc, lk) =>
                         Draw(g, note, fonts.Caption, Theme.Text3, rc, TextFormatFlags.NoPadding | TextFormatFlags.WordBreak | TextFormatFlags.Left | TextFormatFlags.VerticalCenter) });
                 }
@@ -511,7 +511,7 @@ namespace HdrSwitch
                 } });
                 var edit = new Rectangle(exit.X - S(8) - S(32), y, S(32), S(32));
                 string file = choosing != null ? ProfilesFile : ListFile;
-                items.Add(new Item { Rect = edit, Key = "edit", Tip = choosing != null ? "Edit the resolutions (resolutions.txt)" : "Edit the game list (games.txt)", Click = () =>
+                items.Add(new Item { Rect = edit, Key = "edit", Tip = choosing != null ? "Edit resolutions.txt" : "Edit games.txt", Click = () =>
                 {
                     Dismiss(true);   // at once: Notepad is about to come to the front
                     try { Process.Start("notepad.exe", "\"" + file + "\""); } catch { }
@@ -555,19 +555,18 @@ namespace HdrSwitch
                 on = displays.Any(d => d.On);
                 var hdrGames = app.running.Values.Where(r => app.games.Contains(r.Name)).Select(r => app.DisplayName(r.Name)).Distinct().ToList();
                 var res = app.res;
-                if (!displays.Any(d => d.Supported)) { title = "No HDR display found"; sub = "Turn HDR on in Settings › System › Display"; }
+                if (!displays.Any(d => d.Supported)) { title = "No HDR display"; sub = "Check Windows display settings"; }
                 else if (app.recorder != null && !on)
                 {
-                    title = "SDR while recording";
-                    sub = TrayApp.Recorders[app.recorder] + " is running" + (hdrGames.Count > 0 ? " · " + string.Join(", ", hdrGames) : "");
+                    title = "SDR";
+                    sub = TrayApp.Recorders[app.recorder] + " running" + (hdrGames.Count > 0 ? " · " + string.Join(", ", hdrGames) : "");
                 }
                 else if (hdrGames.Count > 0) { title = "HDR on"; sub = string.Join(", ", hdrGames); }
                 else if (res != null) { title = res.Mode.Text; sub = app.DisplayName(res.Game); }
-                else if (on) { title = "HDR is on"; sub = "Turned on elsewhere, so it is left alone"; }
-                else { title = "Waiting for a game"; sub = "HDR turns on the moment a game starts"; }
+                else if (on) { title = "HDR is on"; sub = "Turned on elsewhere"; }
+                else { title = "Waiting for a game"; sub = "HDR off"; }
                 if (res != null && hdrGames.Count > 0) sub += " · " + res.Text;
-                else if (res != null && res.Area != null) sub += app.StretchLost() ? " · not stretched: use borderless" : " · stretched to " + res.Area.Text;
-                else if (res != null && res.Back != null) sub += " · " + res.Back.Text + " after it closes";
+                else if (res != null && res.Area != null) sub += app.StretchLost() ? " · not stretched" : " · stretched";
             }
 
             /// <summary>"92.5 % · 24.6″": how much of the panel a mode covers when shown 1:1 in the middle.</summary>
