@@ -20,7 +20,7 @@ Click the icon (left or right button) and a small panel slides in by the taskbar
 | | |
 |---|---|
 | **Status** | `HDR on` with the game's name, `Waiting for a game`, or `No HDR display`, with an amber dot while HDR is on. A setup hint (for example about a missing resolution) stays here until the game closes. An **Update to …** button appears here when there is one. |
-| **Tiles** | **Start with Windows**, **SDR while recording** (see below) and **Island** (see below). A tile is white while it is on. |
+| **Tiles** | **Start with Windows**, **SDR while recording** (see below) and **Island** (see below). A tile is white and says **On** while it is on, dark and **Off** otherwise. |
 | **Games** | Every game it found, each with a switch: amber means HDR turns on for it. Switching one off keeps it listed, so a slip is one click to undo. The two round buttons in the header **look for games** again and **add a program** it missed, from a list of the programs that are running. |
 | **Bottom bar** | The pencil opens `games.txt`, **Exit** quits. |
 
