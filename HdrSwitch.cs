@@ -118,8 +118,13 @@ namespace HdrSwitch
         readonly List<Hdr.Display> owned = new List<Hdr.Display>();   // displays this app switched to HDR
         ActiveMode res;                                               // the competitive mode this app set, while it is set
         Flyout flyout;
+        Island island;
+        bool islandOn = ReadSetting("Island", true);
+        readonly Stopwatch grace = new Stopwatch();   // since the grace period began: the island counts it down
+        string notice;            // the latest setup hint, kept in the flyout's status card until things settle
         Updater.Release update;   // a newer release, once found
         bool updating;
+        string updateError;       // why the last update didn't install
 
         // Recording apps (process name → name shown). An HDR game captured into an SDR recording comes out washed out,
         // so with "SDR while recording" on, nothing switches HDR on while one of these runs.
@@ -138,12 +143,14 @@ namespace HdrSwitch
             LoadList();
             LoadProfiles();
             flyout = new Flyout(this);
+            // Clicks pass through the island while a game runs or is about to start.
+            island = new Island(() => flyout.Toggle(), () => running.Count > 0 || steamTimeout.Enabled, IslandScreen, Notify, Trim);
 
             tray.MouseUp += (s, e) => { if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right) flyout.Toggle(); };
             tray.Visible = true;
 
             sdrTimer.Tick += (s, e) => { sdrTimer.Stop(); Settle(); };
-            scanTimer.Tick += (s, e) => Rescan();
+            scanTimer.Tick += (s, e) => { Rescan(); island.Poll(); };
             steamTimeout.Tick += (s, e) => { steamTimeout.Stop(); Settle(); };
             reloadTimer.Tick += (s, e) => { reloadTimer.Stop(); LoadList(); LoadProfiles(); ForgetRemoved(); Rescan(); ReapplyProfiles(); };
             modeCheck.Tick += (s, e) => { modeCheck.Stop(); OnDisplayChanged(false); };
@@ -182,7 +189,7 @@ namespace HdrSwitch
             trim.Tick += (s, e) => { trim.Dispose(); Trim(); };
             trim.Start();
 
-            if (updated) Notify("Updated to version " + Updater.CurrentText + ".");
+            if (updated) Announce(new Island.Act { Id = "update", Text = "Updated to version " + Updater.CurrentText, Balloon = "Updated to version " + Updater.CurrentText + "." });
             if (open)
             {
                 var t = new System.Windows.Forms.Timer { Interval = 500 };
@@ -216,13 +223,15 @@ namespace HdrSwitch
         {
             update = r;
             flyout.Sync();
-            Notify("Version " + r.VersionText + " is available – click the tray icon › Update.");
+            Announce(new Island.Act { Id = "update", Title = "Version " + r.VersionText + " is available", Sub = "Open HDR Switch to update", Text = "Update available",
+                Balloon = "Version " + r.VersionText + " is available – click the tray icon › Update." });
         }
 
         void InstallUpdate()
         {
             if (update == null || updating) return;
             updating = true;
+            updateError = null;
             flyout.Sync();
             var r = update;
             new Thread(() =>
@@ -234,8 +243,9 @@ namespace HdrSwitch
                 {
                     if (error == null) { ExitThread(); return; }   // the new version is starting
                     updating = false;
+                    updateError = error;   // the flyout shows the reason under the update button
                     flyout.Sync();
-                    Notify("Update failed: " + error);
+                    Announce(new Island.Act { Id = "update", Text = "Update failed", Dot = Theme.Rec, Balloon = "Update failed: " + error });
                 }, null);
             }) { IsBackground = true }.Start();
         }
@@ -262,16 +272,70 @@ namespace HdrSwitch
             running[pid] = r;
 
             sdrTimer.Stop();
+            island.End("sdr");
             steamTimeout.Stop();
             // HDR first, the mode after it: switching HDR makes Windows reapply the saved display mode, which would
             // throw away a competitive mode set just before. A mode change leaves HDR alone.
-            if (games.Contains(name) && SwitchOn() && Proc.AgeSeconds(pid) > 5 && hinted.Add(name))
-                Notify("HDR came on after " + DisplayName(name) + " had already started. "
+            bool hdr = games.Contains(name) && SwitchOn();
+            if (hdr && Proc.AgeSeconds(pid) > 5 && hinted.Add(name))
+                Hint("HDR came on after " + DisplayName(name) + " had already started. "
                     + "If its HDR option is greyed out, restart the game.");
-            if (profiles.ContainsKey(name) && ApplyResolution(name) && Proc.AgeSeconds(pid) > 5 && resHinted.Add(name))
-                Notify(ResHint(name));
-            if (NeedsSettling()) sdrTimer.Start();   // e.g. HDR was about to go off when a game that only has a resolution started
+            bool mode = profiles.ContainsKey(name) && ApplyResolution(name);
+            if (mode && Proc.AgeSeconds(pid) > 5 && resHinted.Add(name))
+                Hint(ResHint(name));
+            if (hdr || mode) AnnounceGame(name, hdr);
+            StartGrace();   // e.g. HDR was about to go off when a game that only has a resolution started
             UpdateTray();
+        }
+
+        /// <summary>The island: this game just got HDR, its resolution, or both.</summary>
+        void AnnounceGame(string name, bool hdr)
+        {
+            string sub = hdr ? "HDR on" + (res != null ? " · " + res.Text : "") : res.Text;
+            Announce(new Island.Act { Id = "game", Title = DisplayName(name), Sub = sub, Text = hdr ? "HDR on" : res.Mode.Text, Dot = hdr ? Theme.Amber : Theme.Text1 });
+        }
+
+        /// <summary>
+        /// Starts the grace period if something this app switched is no longer needed, and counts it down on the island:
+        /// "SDR in 3s", or the resolution the screen goes back to.
+        /// </summary>
+        void StartGrace()
+        {
+            if (!NeedsSettling() || sdrTimer.Enabled) return;
+            sdrTimer.Start();
+            grace.Restart();
+            bool hdr = owned.Count > 0 && !HdrRunning();
+            string what = hdr ? "SDR" : res != null && res.Back != null ? res.Back.Text : "Resolution back";
+            Announce(new Island.Act { Id = "sdr", Hold = true, Dot = hdr ? Theme.Amber : Theme.Text1,
+                Live = () => what + " in " + Math.Max(1, (int)Math.Ceiling((SdrDelayMs - grace.ElapsedMilliseconds) / 1000.0)) + "s" });
+        }
+
+        /// <summary>Says something on the island – or, with the island switched off, as a notification if it has one.</summary>
+        void Announce(Island.Act a)
+        {
+            if (islandOn) island.Start(a);
+            else if (a.Balloon != null) Notify(a.Balloon);
+        }
+
+        /// <summary>A setup hint: too long for the island, so it is a notification, and stays in the flyout's status card.</summary>
+        void Hint(string text)
+        {
+            notice = text;
+            Notify(text);
+        }
+
+        void SetIsland(bool on)
+        {
+            islandOn = on;
+            WriteSetting("Island", on);
+            if (!on) island.Clear();
+        }
+
+        /// <summary>The screen HDR Switch switches: the island's news is about that one.</summary>
+        static Screen IslandScreen()
+        {
+            string gdi = TargetGdi();
+            return Screen.AllScreens.FirstOrDefault(s => s.DeviceName == gdi) ?? Screen.PrimaryScreen;
         }
 
         /// <summary>Steam says Play was pressed: for a game from the list, the switch happens before the game even starts.</summary>
@@ -282,8 +346,10 @@ namespace HdrSwitch
             string name = games.Concat(profiles.Keys).FirstOrDefault(g => LabelOf(g) == label);
             if (name == null) return;
             sdrTimer.Stop();
-            if (games.Contains(name)) SwitchOn();                  // HDR first – see Track
-            if (profiles.ContainsKey(name)) ApplyResolution(name);
+            island.End("sdr");
+            bool hdr = games.Contains(name) && SwitchOn();                  // HDR first – see Track
+            bool mode = profiles.ContainsKey(name) && ApplyResolution(name);
+            if (hdr || mode) AnnounceGame(name, hdr);
             steamTimeout.Stop();
             steamTimeout.Start();   // back to normal if the game doesn't show up within a minute
             UpdateTray();
@@ -299,7 +365,7 @@ namespace HdrSwitch
                 r.Wait.Unregister(null);
                 r.Handle.Dispose();
             }
-            if (NeedsSettling()) sdrTimer.Start();
+            StartGrace();
             UpdateTray();
         }
 
@@ -313,6 +379,8 @@ namespace HdrSwitch
         /// <summary>After the grace period: whatever no running game needs any more goes back – SDR, the saved mode.</summary>
         void Settle()
         {
+            bool hdrBack = !HdrRunning() && owned.Count > 0;
+            string modeBack = res != null && !ProfiledRunning() ? (res.Back != null ? res.Back.Text : "Resolution back") : null;
             if (!ProfiledRunning())   // the mode first: switching HDR off resets the mode anyway
             {
                 RevertResolution();
@@ -325,6 +393,11 @@ namespace HdrSwitch
                 owned.Clear();
                 if (ours) KeepMode();   // a game with only a resolution may still be running
             }
+            if (running.Count == 0) notice = null;
+            // The countdown ends on what it counted down to, for a moment.
+            if (islandOn && (hdrBack || modeBack != null))
+                island.Start(new Island.Act { Id = "sdr", Text = hdrBack ? "SDR" : modeBack, Dot = hdrBack ? Theme.Grey : Theme.Text1, Seconds = 1.5 });
+            else island.End("sdr");
             UpdateTray();
         }
 
@@ -391,10 +464,11 @@ namespace HdrSwitch
                     foreach (var d in owned) Hdr.Set(d, false);
                     owned.Clear();
                     if (ours) KeepMode();
-                    Notify("HDR is off while " + Recorders[name] + " runs, so recordings keep their colours.");
+                    Announce(new Island.Act { Id = "rec", Text = Recorders[name] + " · SDR", Dot = Theme.Grey, Split = true, Bubble = Theme.Rec, Seconds = 4,
+                        Balloon = "HDR is off while " + Recorders[name] + " runs, so recordings keep their colours." });
                 }
             }
-            else if (HdrRunning()) SwitchOn();
+            else if (HdrRunning() && SwitchOn()) Announce(new Island.Act { Id = "game", Text = "HDR on", Dot = Theme.Amber });
             UpdateTray();
         }
 
@@ -406,10 +480,16 @@ namespace HdrSwitch
             else SetRecorder(null);
         }
 
-        static bool ReadSetting(string name)
+        static bool ReadSetting(string name) { return ReadSetting(name, false); }
+
+        /// <summary>A setting, or its default while it has never been changed.</summary>
+        static bool ReadSetting(string name, bool unset)
         {
             using (var k = Registry.CurrentUser.OpenSubKey(SettingsKey))
-                return k != null && k.GetValue(name) is int && (int)k.GetValue(name) != 0;
+            {
+                object v = k == null ? null : k.GetValue(name);
+                return v is int ? (int)v != 0 : unset;
+            }
         }
 
         static void WriteSetting(string name, bool on)
@@ -504,7 +584,7 @@ namespace HdrSwitch
             // A game in borderless mode can have a lower resolution of its own, stretched over the competitive one.
             Resolution.Mode own = StretchOf(name);
             if (own == null && stretches.ContainsKey(name) && resFailed.Add(name + "/fit"))
-                Notify(stretches[name].Text + " doesn't fit inside " + area.Text + " for " + DisplayName(name) + ", so it isn't stretched: "
+                Hint(stretches[name].Text + " doesn't fit inside " + area.Text + " for " + DisplayName(name) + ", so it isn't stretched: "
                     + "the GPU can only enlarge a picture. Pick a resolution no wider or taller than " + area.Text + ".");
             bool stretch = own != null;
             var mode = stretch ? new Resolution.Mode { Width = own.Width, Height = own.Height, Hz = area.Hz } : area;
@@ -512,7 +592,7 @@ namespace HdrSwitch
             if (!Resolution.Available(gdi, mode.Width, mode.Height, mode.Hz))
             {
                 if (resFailed.Add(name))
-                    Notify("No " + mode.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ". Create " + mode.Width + "×" + mode.Height
+                    Hint("No " + mode.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ". Create " + mode.Width + "×" + mode.Height
                         + " at " + mode.Hz + " Hz as a custom resolution in NVIDIA Control Panel (Change resolution › Customize).");
                 return false;
             }
@@ -524,7 +604,7 @@ namespace HdrSwitch
             if (!SetMode(active))
             {
                 RestoreScaling(gdi, scalingBack);
-                if (resFailed.Add(name)) Notify("Windows didn't switch to " + active.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
+                if (resFailed.Add(name)) Hint("Windows didn't switch to " + active.Text + " at " + mode.Hz + " Hz for " + DisplayName(name) + ".");
                 return false;
             }
             res = active;
@@ -539,13 +619,13 @@ namespace HdrSwitch
                 if (after.TargetW != before.TargetW || after.TargetH != before.TargetH)
                 {
                     resWarned = true;
-                    Notify("The monitor is scaling " + mode.Text + " itself. In NVIDIA Control Panel › Adjust desktop size and position, "
+                    Hint("The monitor is scaling " + mode.Text + " itself. In NVIDIA Control Panel › Adjust desktop size and position, "
                         + "choose No scaling and Perform scaling on: GPU.");
                 }
                 else if (!after.Centered)
                 {
                     resWarned = true;
-                    Notify(mode.Text + " is being stretched. In NVIDIA Control Panel › Adjust desktop size and position, "
+                    Hint(mode.Text + " is being stretched. In NVIDIA Control Panel › Adjust desktop size and position, "
                         + "untick Override the scaling mode set by games and programs.");
                 }
             }
@@ -640,10 +720,11 @@ namespace HdrSwitch
                 // Left alone, like any mode set elsewhere – but said once, because the fix is in the game's settings.
                 if (first) { modeCheck.Stop(); modeCheck.Start(); return; }
                 if (resFailed.Add(res.Game + "/own"))
-                    Notify(DisplayName(res.Game) + " set a display mode of its own, so " + res.Mode.Text + " is no longer stretched over "
+                    Hint(DisplayName(res.Game) + " set a display mode of its own, so " + res.Mode.Text + " is no longer stretched over "
                         + res.Area.Text + ". Stretching needs the game in borderless (fullscreen windowed) mode: change that in its settings, then start it again.");
             }
             if (!ProfiledRunning()) RestoreStrayScaling();   // a deferred restore: maybe the desktop is back at its saved mode now
+            island.Relayout();   // the top-centre may have moved
             UpdateTray();
         }
 
@@ -658,7 +739,7 @@ namespace HdrSwitch
             }
             foreach (var r in running.Values.ToList())
                 if (profiles.ContainsKey(r.Name) && ApplyResolution(r.Name) && resHinted.Add(r.Name))
-                    Notify(ResHint(r.Name));
+                    Hint(ResHint(r.Name));
             UpdateTray();
         }
 
@@ -946,10 +1027,12 @@ namespace HdrSwitch
                 SaveList();
                 Rescan();
             }
-            if (added.Count > 0 || announce)
-                Notify(added.Count == 0 ? "No new games found."
-                    : "Found " + added.Count + " new game" + (added.Count == 1 ? "" : "s") + ": "
-                      + string.Join(", ", added.Select(f => f.Label).Take(3)) + (added.Count > 3 ? "…" : ""));
+            if (added.Count > 0)
+            {
+                string count = added.Count + " new game" + (added.Count == 1 ? "" : "s"), names = string.Join(", ", added.Select(f => f.Label).Take(3)) + (added.Count > 3 ? "…" : "");
+                Announce(new Island.Act { Id = "scan", Title = count + " found", Sub = names, Text = count + " found", Balloon = "Found " + count + ": " + names });
+            }
+            else if (announce) Announce(new Island.Act { Id = "scan", Text = "No new games found", Balloon = "No new games found." });
             flyout.Sync();
             Trim();
         }
@@ -1093,7 +1176,9 @@ namespace HdrSwitch
                 r.Handle.Dispose();
             }
             running.Clear();
+            islandOn = false;   // for this exit only: nothing is announced any more
             Settle();   // SDR and the saved mode, whatever is still running
+            island.Dispose();
             flyout.Dispose();
             tray.Visible = false;
             tray.Dispose();

@@ -141,6 +141,14 @@ namespace HdrSwitch
             else Depart();
         }
 
+        /// <summary>Drops everything: the island was switched off.</summary>
+        public void Clear()
+        {
+            stack.Clear();
+            pending.Clear();
+            Depart();
+        }
+
         /// <summary>Called once a second by the app's process scan: no timer of its own while hidden.</summary>
         public void Poll()
         {
