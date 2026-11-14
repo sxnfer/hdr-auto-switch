@@ -12,7 +12,7 @@ HDR, resolution and scaling switch when a game starts, and switch back when it c
 
 <br>
 
-| | |
+| Feature | What it does |
 | --- | --- |
 | **HDR** | On the moment you press Play, back to SDR 3 seconds after you quit. |
 | **Competitive resolution** | A smaller, centred play area per game, with an optional stretched resolution inside it. [More](docs/competitive-resolution.md) |
