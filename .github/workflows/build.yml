@@ -1,0 +1,16 @@
+# Builds the app on every push and pull request, so a change that doesn't compile is caught before a release.
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        shell: cmd
+        run: call build.cmd

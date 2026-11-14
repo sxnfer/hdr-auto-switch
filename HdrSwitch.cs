@@ -1,4 +1,4 @@
-// HDR Switch – a tiny tray app: Windows HDR turns on while a game from your list runs
+// Display Switch (formerly HDR Switch) – a tiny tray app: Windows HDR turns on while a game from your list runs
 // and goes back to SDR a few seconds after it closes.
 //
 // Games are found automatically (Steam, Epic, GOG, Ubisoft and game folders on every drive) and caught
@@ -29,8 +29,8 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
 
-[assembly: System.Reflection.AssemblyTitle("HDR Switch")]
-[assembly: System.Reflection.AssemblyProduct("HDR Switch")]
+[assembly: System.Reflection.AssemblyTitle("Display Switch")]
+[assembly: System.Reflection.AssemblyProduct("Display Switch")]
 // AssemblyVersion: written by build.cmd into Version.g.cs
 
 namespace HdrSwitch
@@ -55,7 +55,7 @@ namespace HdrSwitch
                 catch (AbandonedMutexException) { mine = true; }
                 if (!mine)
                 {
-                    MessageBox.Show("HDR Switch is already running.", "HDR Switch");
+                    MessageBox.Show("Display Switch is already running.", "Display Switch");
                     return;
                 }
                 Application.EnableVisualStyles();
@@ -71,6 +71,8 @@ namespace HdrSwitch
     {
         const int SdrDelayMs = 3000;   // wait after the last game closes (covers launchers that restart the game)
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        // The app was called HDR Switch until 1.6.0. These names stay as they were so an update keeps the
+        // startup entry, settings, game list and the single-instance lock of the copy it replaces.
         const string RunValue = "HDR Switch";
         const string SettingsKey = @"Software\HDR Switch";
         static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "HdrSwitch");
@@ -330,7 +332,7 @@ namespace HdrSwitch
             if (!on) island.Clear();
         }
 
-        /// <summary>The screen HDR Switch switches: the island's news is about that one.</summary>
+        /// <summary>The screen Display Switch switches: the island's news is about that one.</summary>
         static Screen IslandScreen()
         {
             string gdi = TargetGdi();
@@ -871,7 +873,7 @@ namespace HdrSwitch
         {
             var lines = new List<string>
             {
-                "# HDR Switch - competitive resolutions. While one of these games runs, the screen switches to this",
+                "# Display Switch - competitive resolutions. While one of these games runs, the screen switches to this",
                 "# resolution, shown 1:1 in the middle with black borders, and goes back when the game closes.",
                 "# One game per line: exe, resolution, optional @refresh rate (otherwise the current one). Text after # is a note.",
                 "# The resolution must be in Windows' list: create it in NVIDIA Control Panel > Change resolution > Customize.",
@@ -959,7 +961,7 @@ namespace HdrSwitch
         {
             var lines = new List<string>
             {
-                "# HDR Switch - HDR turns on while one of these runs. One exe per line; text after # is just a note.",
+                "# Display Switch - HDR turns on while one of these runs. One exe per line; text after # is just a note.",
                 "# Games are found automatically (Steam, Epic, GOG, Ubisoft, and game folders on your drives).",
                 "# Missing one? Add its exe on a new line. Changes apply as soon as you save.",
                 "# To stop a game switching HDR, put a - in front of it (deleting the line lets the next scan add it again).",
@@ -1099,14 +1101,14 @@ namespace HdrSwitch
         void UpdateTray()
         {
             tray.Icon = Hdr.All().Any(d => d.On) ? iconOn : iconOff;
-            string text = "HDR Switch " + Updater.CurrentText + "\n" + StatusText();
+            string text = "Display Switch " + Updater.CurrentText + "\n" + StatusText();
             tray.Text = text.Length > 63 ? text.Substring(0, 62) + "…" : text;   // NotifyIcon limit
             if (flyout != null) flyout.Sync();
         }
 
         void Notify(string text)
         {
-            tray.ShowBalloonTip(3000, "HDR Switch", text, ToolTipIcon.None);
+            tray.ShowBalloonTip(3000, "Display Switch", text, ToolTipIcon.None);
         }
 
         static bool IsStartup()
@@ -1185,9 +1187,17 @@ namespace HdrSwitch
     /// </summary>
     static class Updater
     {
-        public const string Repo = "sxnfer/hdr-auto-switch";
-        const string ExeName = "HdrSwitch.exe";
-        static readonly string DownloadPrefix = "https://github.com/" + Repo + "/releases/download/";
+        // The repository was renamed from hdr-auto-switch to game-display-switch. Releases are looked up under the
+        // new name first and the old one as a fallback, and downloads from either are accepted (GitHub serves the
+        // same repository under both), so updates keep working on either side of the rename.
+        public const string Repo = "sxnfer/game-display-switch";
+        const string OldRepo = "sxnfer/hdr-auto-switch";
+        const string ExeName = "HdrSwitch.exe";   // kept: copies before 1.6.0 look for this asset name
+        static readonly string[] DownloadPrefixes =
+        {
+            "https://github.com/" + Repo + "/releases/download/",
+            "https://github.com/" + OldRepo + "/releases/download/",
+        };
 
         public sealed class Release
         {
@@ -1206,7 +1216,8 @@ namespace HdrSwitch
         public static Release Latest()
         {
             string json;
-            using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest");
+            try { using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + Repo + "/releases/latest"); }
+            catch (System.Net.WebException) { using (var web = Client()) json = web.DownloadString("https://api.github.com/repos/" + OldRepo + "/releases/latest"); }
             var data = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(json);
 
             Version v;
@@ -1220,7 +1231,7 @@ namespace HdrSwitch
                 var a = o as Dictionary<string, object>;
                 if (a == null) continue;
                 string name = a["name"] as string, url = a["browser_download_url"] as string;
-                if (url == null || !url.StartsWith(DownloadPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (url == null || !DownloadPrefixes.Any(p => url.StartsWith(p, StringComparison.OrdinalIgnoreCase))) continue;
                 if (name == ExeName) r.ExeUrl = url;
                 else if (name == "SHA256SUMS.txt") r.SumsUrl = url;
             }
@@ -1278,7 +1289,7 @@ namespace HdrSwitch
         {
             System.Net.ServicePointManager.SecurityProtocol |= System.Net.SecurityProtocolType.Tls12;
             var web = new System.Net.WebClient();
-            web.Headers[System.Net.HttpRequestHeader.UserAgent] = "hdr-auto-switch/" + CurrentText;   // required by the GitHub API
+            web.Headers[System.Net.HttpRequestHeader.UserAgent] = "game-display-switch/" + CurrentText;   // required by the GitHub API
             return web;
         }
 

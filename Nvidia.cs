@@ -4,7 +4,7 @@
 //
 // Why: a game in exclusive fullscreen sets its own display mode without saying how to scale it, so the driver's default
 // decides. With "Full screen" the competitive resolution would be stretched over the whole panel; with "No scaling" it
-// stays centred. HDR Switch switches the default to No scaling only while a game with a competitive resolution runs.
+// stays centred. Display Switch switches the default to No scaling only while a game with a competitive resolution runs.
 //
 // The switch only takes hold as the default when it is saved (NV_DISPLAYCONFIG_SAVE_TO_PERSISTENCE, as Control Panel
 // does), so it survives a crash or reboot: TrayApp keeps the original value in its state file and puts it back.

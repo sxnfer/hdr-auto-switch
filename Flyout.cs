@@ -79,7 +79,7 @@ namespace HdrSwitch
                 TopMost = true;
                 StartPosition = FormStartPosition.Manual;
                 BackColor = Theme.Bg;
-                Text = "HDR Switch";
+                Text = "Display Switch";
                 SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
 
                 const TextFormatFlags Base = TextFormatFlags.NoPadding | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter;
@@ -500,7 +500,7 @@ namespace HdrSwitch
                 y = c3.Bottom + G;
 
                 // Bottom bar, straight on the window: version, edit the list, exit.
-                string version = "HDR Switch " + Updater.CurrentText;
+                string version = "Display Switch " + Updater.CurrentText;
                 int exitW = TextRenderer.MeasureText("Exit", fonts.Body, Size.Empty, TfLeft).Width + S(32);
                 var exit = new Rectangle(W - M - exitW, y, exitW, S(32));
                 items.Add(new Item { Rect = new Rectangle(M + S(4), y, exit.X - M - S(48), S(32)), Paint = (g, rc, lk) => Draw(g, version, fonts.Caption, Theme.Text3, rc, TfLeft) });

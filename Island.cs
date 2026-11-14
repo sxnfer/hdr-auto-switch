@@ -88,7 +88,7 @@ namespace HdrSwitch
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            Text = "HDR Switch";
+            Text = "Display Switch";
             fmt.FormatFlags |= StringFormatFlags.NoWrap;
             tick = Tick;
             life.Tick += (s, e) => Live();
